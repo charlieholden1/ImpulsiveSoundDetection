@@ -1,0 +1,70 @@
+# ── Virtual environments ──────────────────────────────────────────────
+venv/
+env/
+.venv/
+.env/
+
+# ── Python cache & compiled files ────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# ── Distribution / packaging ──────────────────────────────────────────
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Environment & secrets ─────────────────────────────────────────────
+.env
+.env.*
+*.env
+
+# ── Logs & output ─────────────────────────────────────────────────────
+*.log
+logs/
+detections_*.json
+
+# ── Dataset files ────────────────────────────────────────────────────
+clean/audio/
+clean/annotation/
+clean/source/
+clean/target/
+
+# ── Dataset spectrogram images ────────────────────────────────────────
+Gunshot Audio Spectrogram Dataset for Binary Class/FFT/
+Gunshot Audio Spectrogram Dataset for Binary Class/LogMel/
+Gunshot Audio Spectrogram Dataset for Binary Class/MFCC/
+
+# ── Loose audio/image files ───────────────────────────────────────────
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# ── ML model artefacts & caches ───────────────────────────────────────
+*.h5
+*.keras
+*.ckpt
+*.pb
+saved_model/
+checkpoints/
+tensorflow_hub_cache/
+tfhub_cache/
+
+# ── Jupyter ───────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── OS artefacts ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.suo
+*.user

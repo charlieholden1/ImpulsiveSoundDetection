@@ -1,0 +1,220 @@
+"""
+classifier.py – YAMNet-based classification and suspicious-label filtering
+(Stage 2).
+
+Loads the YAMNet model from TensorFlow Hub, runs inference on a 0.975 s
+audio window, extracts the top-K predictions, and maps them to a binary
+"suspicious" / "non-suspicious" label.
+
+Public API
+----------
+YAMNetClassifier
+    Stateful wrapper that lazily loads the model on first use.
+ClassificationResult
+    Structured output of a single inference call.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from dataclasses import asdict, dataclass, field
+from typing import List
+
+import numpy as np
+import tensorflow as tf
+import tensorflow_hub as hub
+
+from . import config
+
+logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Result container
+# ──────────────────────────────────────────────────────────────────────
+@dataclass
+class ClassificationResult:
+    """Output of a single YAMNet inference."""
+
+    timestamp: float
+    onset_index: int
+    label: str
+    confidence: float
+    is_suspicious: bool
+    top_k: List[dict] = field(default_factory=list)
+
+    def to_json(self) -> str:
+        """Serialise to a compact JSON string.
+
+        Returns
+        -------
+        str
+            JSON representation of the detection event.
+        """
+        payload = {
+            "timestamp": self.timestamp,
+            "onset_index": self.onset_index,
+            "label": self.label,
+            "confidence": round(self.confidence, 4),
+            "is_suspicious": self.is_suspicious,
+        }
+        return json.dumps(payload)
+
+    def to_dict(self) -> dict:
+        """Return a plain dictionary for logging or aggregation.
+
+        Returns
+        -------
+        dict
+        """
+        return asdict(self)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YAMNet classifier wrapper
+# ──────────────────────────────────────────────────────────────────────
+class YAMNetClassifier:
+    """Lazy-loading YAMNet wrapper with suspicious-label filtering.
+
+    Parameters
+    ----------
+    model_handle : str
+        TensorFlow Hub URL for the YAMNet model.
+    top_k : int
+        Number of top predictions to retain.
+    suspicious_labels : frozenset
+        Set of YAMNet class names that should be flagged suspicious.
+    """
+
+    def __init__(
+        self,
+        model_handle: str = config.YAMNET_MODEL_HANDLE,
+        top_k: int = config.TOP_K,
+        suspicious_labels: frozenset = config.SUSPICIOUS_LABELS,
+    ) -> None:
+        self._model_handle = model_handle
+        self._top_k = top_k
+        self._suspicious_labels = suspicious_labels
+        self._model = None
+        self._class_names: List[str] = []
+
+    # ── lazy model loading ────────────────────────────────────────────
+    def _ensure_model(self) -> None:
+        """Load YAMNet from TF-Hub if not already cached.
+
+        Raises
+        ------
+        RuntimeError
+            If the model cannot be loaded.
+        """
+        if self._model is not None:
+            return
+        logger.info("Loading YAMNet from %s …", self._model_handle)
+        try:
+            self._model = hub.load(self._model_handle)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load YAMNet: {exc}"
+            ) from exc
+
+        # Retrieve the class-name map shipped inside the SavedModel
+        class_map_path = self._model.class_map_path().numpy().decode("utf-8")
+        with open(class_map_path, "r", encoding="utf-8") as fh:
+            # CSV: index, mid, display_name
+            lines = fh.read().strip().splitlines()
+        self._class_names = []
+        for line in lines[1:]:                       # skip header
+            parts = line.split(",")
+            if len(parts) >= 3:
+                self._class_names.append(parts[2].strip('" '))
+            else:
+                self._class_names.append(parts[-1].strip('" '))
+        logger.info(
+            "YAMNet loaded – %d class labels available",
+            len(self._class_names),
+        )
+
+    # ── inference ─────────────────────────────────────────────────────
+    def classify(
+        self,
+        waveform: np.ndarray,
+        timestamp: float = 0.0,
+        onset_index: int = 0,
+    ) -> ClassificationResult:
+        """Run YAMNet inference on a single audio window.
+
+        Parameters
+        ----------
+        waveform : np.ndarray
+            1-D float32 array at 16 kHz.  Ideally 0.975 s
+            (15 600 samples) but YAMNet tolerates slightly different
+            lengths.
+        timestamp : float
+            Playback timestamp (seconds) for logging / JSON output.
+        onset_index : int
+            Absolute sample index of the trigger onset.
+
+        Returns
+        -------
+        ClassificationResult
+        """
+        self._ensure_model()
+
+        # YAMNet expects a 1-D float32 tensor in [-1, 1]
+        waveform = waveform.astype(np.float32)
+        scores, embeddings, spectrogram = self._model(waveform)
+        scores_np: np.ndarray = scores.numpy()
+
+        # Average over time frames → single score vector
+        mean_scores = scores_np.mean(axis=0)
+        top_indices = mean_scores.argsort()[::-1][: self._top_k]
+
+        top_k_list = []
+        for idx in top_indices:
+            name = (
+                self._class_names[idx]
+                if idx < len(self._class_names)
+                else f"class_{idx}"
+            )
+            top_k_list.append(
+                {"class": name, "score": float(round(mean_scores[idx], 4))}
+            )
+
+        best = top_k_list[0]
+        is_suspicious = self._is_suspicious(top_k_list)
+
+        result = ClassificationResult(
+            timestamp=round(timestamp, 4),
+            onset_index=onset_index,
+            label=best["class"],
+            confidence=best["score"],
+            is_suspicious=is_suspicious,
+            top_k=top_k_list,
+        )
+        logger.info(
+            "t=%.3f s  →  %s (%.2f)  suspicious=%s",
+            timestamp,
+            best["class"],
+            best["score"],
+            is_suspicious,
+        )
+        return result
+
+    def _is_suspicious(self, top_k: List[dict]) -> bool:
+        """Check whether any top-K label matches the suspicious set.
+
+        Parameters
+        ----------
+        top_k : list[dict]
+            List of ``{"class": str, "score": float}`` dicts.
+
+        Returns
+        -------
+        bool
+        """
+        for entry in top_k:
+            for susp in self._suspicious_labels:
+                if susp.lower() in entry["class"].lower():
+                    return True
+        return False
