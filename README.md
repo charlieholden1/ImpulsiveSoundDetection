@@ -45,18 +45,69 @@ pip install tensorflow tensorflow-hub librosa audiomentations \
 
 ### 4. Obtain the datasets
 
-The following data directories are excluded from version control due to their size. Place them in the project root before using `prepare` or `demo` mode:
+None of the datasets are tracked in git. Download them and place them as shown below before running `prepare`, `train`, or `demo`.
 
-| Directory | Contents |
-|-----------|----------|
-| `clean/audio/` | VOICe dataset WAV files |
-| `clean/source/` | Source file lists (`synthetic_source_training.txt`, etc.) |
-| `clean/target/` | Target/reference files |
-| `Gunshot Audio Spectrogram Dataset for Binary Class/FFT/` | FFT spectrogram PNGs |
-| `Gunshot Audio Spectrogram Dataset for Binary Class/LogMel/` | Log-Mel spectrogram PNGs |
-| `Gunshot Audio Spectrogram Dataset for Binary Class/MFCC/` | MFCC spectrogram PNGs |
+#### A — Gunshot Audio Spectrogram Dataset *(CNN training)*
 
-### 5. (Optional) Configure paths and parameters
+Search Kaggle for **"Gunshot Audio Spectrogram Dataset for Binary Classification"**. After downloading and extracting, the folder must be placed in the project root with this exact name and layout:
+
+```
+Gunshot Audio Spectrogram Dataset for Binary Class/
+├── FFT/
+├── LogMel/
+└── MFCC/
+```
+
+#### B — VOICe Dataset *(pipeline evaluation)*
+
+Search for **"VOICe sound event detection dataset"** and download the version that includes gunshot and glassbreak annotations. Extract so the layout is:
+
+```
+clean/
+├── audio/        ← WAV files
+├── annotation/   ← label text files (.txt)
+├── source/       ← file lists (synthetic_source_training.txt, etc.)
+└── target/
+```
+
+#### C — ReaLISED Dataset *(benchmarking — auto-downloaded)*
+
+No manual download needed. The training script fetches it automatically from [Zenodo](https://zenodo.org/records/6488321) on the first benchmark run and saves it to `external_data/ReaLISED/`.
+
+---
+
+### 5. Obtain the trained models
+
+The `.keras` and `.tflite` model files are not tracked in git. You have two options:
+
+**Option A — Re-train from scratch** *(recommended — takes ~5–10 min per feature type)*
+
+```bash
+# Train the best-performing feature type (LogMel)
+python -m train.train --feature-type LogMel
+
+# Or run a full sweep across FFT, LogMel, and MFCC
+python -m train.feature_sweep
+```
+
+Trained models are saved to `models/` automatically. The classifier mode is controlled by `CLASSIFIER_MODE` in `config.py` (default: `yamnet`, no training needed).
+
+**Option B — Copy models from a teammate**
+
+Copy the `models/` folder directly from a machine that has already trained. The required files are:
+
+```
+models/
+├── cnn_gunshot_classifier.keras          ← main model
+└── feature_sweep_stagea6/
+    ├── fft/cnn_gunshot_classifier.keras
+    ├── logmel/cnn_gunshot_classifier.keras
+    └── mfcc/cnn_gunshot_classifier.keras
+```
+
+---
+
+### 6. (Optional) Configure paths and parameters
 
 All tunable constants live in [`impulsive_sound_detection/config.py`](impulsive_sound_detection/config.py). Update `GUNSHOT_SPECTROGRAM_DIR` and `VOICE_DATASET_DIR` if your data lives outside the default project root.
 

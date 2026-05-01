@@ -1,0 +1,8 @@
+              precision    recall  f1-score   support
+
+       NOGUN       0.99      0.99      0.99      1553
+         GUN       0.98      0.98      0.98       822
+
+    accuracy                           0.99      2375
+   macro avg       0.99      0.99      0.99      2375
+weighted avg       0.99      0.99      0.99      2375

@@ -1,34 +1,4 @@
-"""
-gui.py – Professional dark-mode GUI dashboard using *customtkinter*.
-
-Embeds a live scrolling Matplotlib plot (RMS energy vs. dynamic
-threshold), a colour-coded event log, and a control sidebar with
-real-time parameter tuning – all without blocking the audio or
-inference threads.
-
-Threading architecture
-~~~~~~~~~~~~~~~~~~~~~~
-::
-
-    Main Thread (Tk)          Audio Thread (sounddevice)   Inference Thread
-    ────────────────          ───────────────────────────  ────────────────
-    CTk mainloop              InputStream callback         _inference_loop()
-      ├ _poll_gui_queue()       └ StreamMonitor.feed()       └ YAMNet classify
-      │   (root.after 70ms)                                     └ gui_queue.put()
-      └ _animate_plot()
-          (root.after 80ms)
-
-* ``sounddevice`` callback → feeds audio into ``StreamMonitor``
-  (Stage 1, fast – runs on its own thread managed by PortAudio).
-* ``_inference_loop`` → pulls from ``trigger_queue``, runs YAMNet,
-  pushes ``ClassificationResult`` into ``gui_queue``.
-* ``_poll_gui_queue`` / ``_animate_plot`` → scheduled on the **main
-  thread** via ``root.after()``; safe to touch Tk widgets.
-
-Usage
------
-    python -m impulsive_sound_detection.main gui
-"""
+"""Modern desktop dashboard for live and replayed detection."""
 
 from __future__ import annotations
 
@@ -38,7 +8,7 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
 import numpy as np
@@ -46,446 +16,444 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from . import config
-from .classifier import ClassificationResult, YAMNetClassifier
+from .classifier import CNNClassifier, ClassificationResult, YAMNetClassifier
 from .data_loader import load_wav
 from .stream_monitor import StreamMonitor
 
 logger = logging.getLogger(__name__)
 
-# ── Try importing sounddevice at module level ─────────────────────────
 try:
     import sounddevice as sd
 except ImportError:  # pragma: no cover
     sd = None  # type: ignore[assignment]
 
 
-# ======================================================================
-#  Constants for the GUI layout and animation
-# ======================================================================
-_PLOT_HISTORY_SEC: float = 15.0      # Seconds of RMS shown on x-axis
-_PLOT_FPS: int = 12                  # Target frames per second for plot
-_PLOT_INTERVAL_MS: int = int(1000 / _PLOT_FPS)
-_QUEUE_POLL_MS: int = 70             # How often to check gui_queue
-_SIDEBAR_WIDTH: int = 260            # Pixels
-_WINDOW_MIN_W: int = 1100
-_WINDOW_MIN_H: int = 700
+PLOT_HISTORY_SEC = 18.0
+PLOT_INTERVAL_MS = 80
+QUEUE_POLL_MS = 70
+MAX_LOG_LINES = 160
+MAX_MARKERS = 24
 
-# Colour palette (hex) – consistent dark theme
-_CLR_BG = "#1a1a2e"
-_CLR_SIDEBAR = "#16213e"
-_CLR_ACCENT = "#0f3460"
-_CLR_ALERT_RED = "#e74c3c"
-_CLR_ALERT_GREEN = "#27ae60"
-_CLR_TEXT = "#e0e0e0"
-_CLR_TEXT_DIM = "#8899aa"
-_CLR_PLOT_RMS = "#00b4d8"
-_CLR_PLOT_THR = "#e74c3c"
+BG = "#0B1020"
+PANEL = "#111827"
+PANEL_ALT = "#162033"
+BORDER = "#24324D"
+TEXT = "#E7EEF8"
+MUTED = "#8EA1BD"
+ACCENT = "#4F8CFF"
+ACCENT_2 = "#53D1BB"
+SAFE = "#44D17A"
+WARN = "#F5B942"
+DANGER = "#FF6B6B"
+RMS = "#66D9EF"
+THRESH = "#FF8A65"
 
 
-# ======================================================================
-#  Main application class
-# ======================================================================
+def _fmt_time(value: float) -> str:
+    minutes = int(value // 60)
+    seconds = int(value % 60)
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _severity_color(name: str) -> str:
+    if name == "HIGH":
+        return DANGER
+    if name == "MEDIUM":
+        return WARN
+    return SAFE
+
+
 class DetectionGUI(ctk.CTk):
-    """Top-level customtkinter window for the detection dashboard.
+    """Professional real-time detection console."""
 
-    Parameters
-    ----------
-    log_path : str | None
-        Optional JSONL log path for persisting results.
-    """
-
-    # ------------------------------------------------------------------
-    #  Initialisation
-    # ------------------------------------------------------------------
     def __init__(self, log_path: Optional[str] = None) -> None:
-        super().__init__()
-
-        # ── Window basics ─────────────────────────────────────────────
-        self.title("Impulsive Sound Detection – Dashboard")
-        self.minsize(_WINDOW_MIN_W, _WINDOW_MIN_H)
-        self.geometry("1200x750")
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
+        super().__init__()
 
-        # ── Shared state ──────────────────────────────────────────────
+        self.title("Impulse Detection Console")
+        self.geometry("1520x920")
+        self.minsize(1320, 820)
+        self.configure(fg_color=BG)
+
         self._log_path = Path(log_path) if log_path else None
         self._monitor: Optional[StreamMonitor] = None
-        self._classifier: Optional[YAMNetClassifier] = None
-        self._sd_stream: object = None  # sounddevice.InputStream or None
-        self._sd_output: object = None  # sounddevice.OutputStream or None
+        self._classifier: object = None
+        self._sd_stream: object = None
+        self._sd_output: object = None
         self._wav_thread: Optional[threading.Thread] = None
-
-        # Inference worker
         self._worker_thread: Optional[threading.Thread] = None
         self._worker_stop = threading.Event()
-
-        # Thread-safe queue: inference thread → GUI thread
         self._gui_queue: queue.Queue[ClassificationResult] = queue.Queue()
 
-        # Plot data buffers (ring arrays)
         self._plot_maxlen = int(
-            _PLOT_HISTORY_SEC * config.SAMPLE_RATE / config.RMS_FRAME_SIZE
+            PLOT_HISTORY_SEC * config.SAMPLE_RATE / config.RMS_FRAME_SIZE
         )
         self._rms_buf: List[float] = []
         self._thr_buf: List[float] = []
         self._time_buf: List[float] = []
-        self._stream_start: float = 0.0
+        self._marker_times: List[float] = []
+        self._marker_levels: List[float] = []
 
-        # Counters
-        self._total_alerts: int = 0
-        self._suspicious_alerts: int = 0
-        self._is_streaming: bool = False
+        self._stream_start = 0.0
+        self._source_duration_sec = 0.0
+        self._source_position_sec = 0.0
+        self._source_name = "Microphone"
+        self._is_streaming = False
+        self._total_alerts = 0
+        self._suspicious_alerts = 0
+        self._last_result: Optional[ClassificationResult] = None
+        self._metric_labels: Dict[str, ctk.CTkLabel] = {}
 
-        # ── Build UI ──────────────────────────────────────────────────
+        self.grid_columnconfigure(0, minsize=320)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, minsize=320)
+        self.grid_rowconfigure(0, weight=1)
+
         self._build_sidebar()
-        self._build_main_area()
-
-        # ── Protocol: clean shutdown on window close ──────────────────
+        self._build_main()
+        self._build_inspector()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._set_status("Idle", MUTED)
+        self._set_metric("alerts", "0")
+        self._set_metric("suspicious", "0")
+        self._set_metric("source", "MIC")
+        self._set_metric("classifier", config.CLASSIFIER_MODE.upper())
+        self._refresh_transport()
 
-    # ==================================================================
-    #  UI Construction
-    # ==================================================================
+    def _card(self, parent, fg_color: str = PANEL, radius: int = 18):
+        return ctk.CTkFrame(
+            parent,
+            fg_color=fg_color,
+            border_width=1,
+            border_color=BORDER,
+            corner_radius=radius,
+        )
+
     def _build_sidebar(self) -> None:
-        """Construct the left sidebar with controls and sliders."""
-        sidebar = ctk.CTkFrame(self, width=_SIDEBAR_WIDTH, corner_radius=0)
-        sidebar.pack(side="left", fill="y")
-        sidebar.pack_propagate(False)
+        sidebar = self._card(self, fg_color="#0F172A", radius=0)
+        sidebar.grid(row=0, column=0, sticky="nsew")
+        sidebar.grid_columnconfigure(0, weight=1)
 
-        # ── Title ─────────────────────────────────────────────────────
         ctk.CTkLabel(
             sidebar,
-            text="🎛  Controls",
-            font=ctk.CTkFont(size=18, weight="bold"),
-        ).pack(pady=(18, 10), padx=14, anchor="w")
-
-        # ── Input mode dropdown ───────────────────────────────────────
-        ctk.CTkLabel(
-            sidebar, text="Input Source", font=ctk.CTkFont(size=12)
-        ).pack(padx=14, anchor="w")
-        self._input_var = ctk.StringVar(value="Live Microphone")
-        self._input_dropdown = ctk.CTkOptionMenu(
-            sidebar,
-            variable=self._input_var,
-            values=["Live Microphone", "WAV File Playback"],
-            width=220,
-            command=self._on_input_mode_changed,
-        )
-        self._input_dropdown.pack(padx=14, pady=(2, 8))
-
-        # ── WAV file chooser (hidden by default) ──────────────────────
-        self._wav_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
-        self._wav_path_var = ctk.StringVar(value="")
-        self._wav_entry = ctk.CTkEntry(
-            self._wav_frame,
-            textvariable=self._wav_path_var,
-            placeholder_text="Path to .wav file",
-            width=150,
-        )
-        self._wav_entry.pack(side="left", padx=(0, 4))
-        self._wav_browse_btn = ctk.CTkButton(
-            self._wav_frame,
-            text="…",
-            width=36,
-            command=self._browse_wav,
-        )
-        self._wav_browse_btn.pack(side="left")
-        # (not packed yet – shown only when mode == WAV)
-
-        # ── Start / Stop ──────────────────────────────────────────────
-        btn_frame = ctk.CTkFrame(sidebar, fg_color="transparent")
-        btn_frame.pack(padx=14, pady=10, fill="x")
-        self._start_btn = ctk.CTkButton(
-            btn_frame,
-            text="▶  Start Stream",
-            fg_color="#27ae60",
-            hover_color="#219150",
-            command=self._on_start,
-        )
-        self._start_btn.pack(fill="x", pady=(0, 6))
-        self._stop_btn = ctk.CTkButton(
-            btn_frame,
-            text="■  Stop Stream",
-            fg_color="#c0392b",
-            hover_color="#96281b",
-            state="disabled",
-            command=self._on_stop,
-        )
-        self._stop_btn.pack(fill="x")
-
-        # ── Separator ─────────────────────────────────────────────────
+            text="Impulse Detection",
+            font=ctk.CTkFont(family="Segoe UI", size=26, weight="bold"),
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w", padx=22, pady=(24, 6))
         ctk.CTkLabel(
             sidebar,
-            text="─── Live Tuning ───",
-            font=ctk.CTkFont(size=11),
-            text_color=_CLR_TEXT_DIM,
-        ).pack(pady=(16, 4))
+            text="Modern live console for microphone monitoring and WAV replay.",
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+            text_color=MUTED,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", padx=22)
 
-        # ── Energy multiplier slider ──────────────────────────────────
+        controls = self._card(sidebar)
+        controls.grid(row=2, column=0, sticky="ew", padx=18, pady=14)
+        controls.grid_columnconfigure(0, weight=1)
+
+        self._source_var = tk.StringVar(value="Live")
         ctk.CTkLabel(
-            sidebar, text="Threshold Multiplier", font=ctk.CTkFont(size=12)
-        ).pack(padx=14, anchor="w")
+            controls, text="Input source", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(16, 8))
+        self._source_switch = ctk.CTkSegmentedButton(
+            controls,
+            values=["Live", "File"],
+            variable=self._source_var,
+            command=self._on_source_changed,
+            selected_color=ACCENT,
+            selected_hover_color="#6A9EFF",
+            unselected_color=PANEL_ALT,
+            unselected_hover_color="#1D2942",
+            text_color=TEXT,
+        )
+        self._source_switch.grid(row=1, column=0, sticky="ew", padx=16)
+
+        self._file_frame = ctk.CTkFrame(controls, fg_color="transparent")
+        self._file_frame.grid_columnconfigure(0, weight=1)
+        self._file_path_var = tk.StringVar()
+        self._file_entry = ctk.CTkEntry(
+            self._file_frame,
+            textvariable=self._file_path_var,
+            placeholder_text="Select a WAV file",
+            height=40,
+            fg_color=PANEL_ALT,
+            border_color=BORDER,
+            text_color=TEXT,
+        )
+        self._file_entry.grid(row=0, column=0, sticky="ew")
+        self._file_button = ctk.CTkButton(
+            self._file_frame, text="Browse", width=84, height=40,
+            fg_color=ACCENT, hover_color="#6A9EFF", command=self._browse_wav,
+        )
+        self._file_button.grid(row=0, column=1, padx=(10, 0))
+
+        ctk.CTkLabel(
+            controls, text="Classifier", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"),
+        ).grid(row=3, column=0, sticky="w", padx=16, pady=(16, 8))
+        self._classifier_var = tk.StringVar(value=config.CLASSIFIER_MODE)
+        self._classifier_menu = ctk.CTkOptionMenu(
+            controls,
+            variable=self._classifier_var,
+            values=["cnn", "yamnet", "ensemble"],
+            fg_color=PANEL_ALT,
+            button_color=PANEL_ALT,
+            button_hover_color="#1D2942",
+            dropdown_fg_color=PANEL_ALT,
+            text_color=TEXT,
+            dropdown_text_color=TEXT,
+            command=lambda _: self._set_metric("classifier", self._classifier_var.get().upper()),
+        )
+        self._classifier_menu.grid(row=4, column=0, sticky="ew", padx=16)
+
+        ctk.CTkLabel(
+            controls,
+            text=(
+                f"Model: {Path(config.CNN_MODEL_PATH).name}\n"
+                f"Feature: {config.CNN_FEATURE_TYPE}\n"
+                f"Threshold: {config.CNN_DECISION_THRESHOLD:.2f}"
+            ),
+            justify="left",
+            text_color=MUTED,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).grid(row=5, column=0, sticky="w", padx=16, pady=(14, 12))
+
+        tuning = self._card(sidebar)
+        tuning.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 14))
+        tuning.grid_columnconfigure(0, weight=1)
+
         self._mult_var = tk.DoubleVar(value=config.ENERGY_MULTIPLIER)
-        self._mult_label = ctk.CTkLabel(
-            sidebar,
-            text=f"{config.ENERGY_MULTIPLIER:.1f}×",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        )
-        self._mult_label.pack(padx=14, anchor="e")
+        self._dead_var = tk.DoubleVar(value=config.MIN_RETRIGGER_SEC)
+        self._mult_label = ctk.CTkLabel(tuning, text="", text_color=TEXT)
+        self._dead_label = ctk.CTkLabel(tuning, text="", text_color=TEXT)
+        self._slider_block(tuning, 0, "Trigger multiplier", self._mult_label)
         self._mult_slider = ctk.CTkSlider(
-            sidebar,
-            from_=1.5,
-            to=10.0,
-            number_of_steps=85,
-            variable=self._mult_var,
-            width=220,
+            tuning, from_=1.5, to=10.0, number_of_steps=85,
+            variable=self._mult_var, progress_color=ACCENT_2,
+            button_color=ACCENT, button_hover_color="#6A9EFF",
             command=self._on_mult_changed,
         )
-        self._mult_slider.pack(padx=14, pady=(0, 10))
-
-        # ── Dead-time slider ──────────────────────────────────────────
-        ctk.CTkLabel(
-            sidebar, text="Min Re-trigger (s)", font=ctk.CTkFont(size=12)
-        ).pack(padx=14, anchor="w")
-        self._dead_var = tk.DoubleVar(value=config.MIN_RETRIGGER_SEC)
-        self._dead_label = ctk.CTkLabel(
-            sidebar,
-            text=f"{config.MIN_RETRIGGER_SEC:.2f} s",
-            font=ctk.CTkFont(size=12, weight="bold"),
-        )
-        self._dead_label.pack(padx=14, anchor="e")
+        self._mult_slider.grid(row=2, column=0, sticky="ew", padx=16, pady=(4, 10))
+        self._slider_block(tuning, 3, "Re-trigger guard", self._dead_label)
         self._dead_slider = ctk.CTkSlider(
-            sidebar,
-            from_=0.1,
-            to=3.0,
-            number_of_steps=58,
-            variable=self._dead_var,
-            width=220,
+            tuning, from_=0.1, to=3.0, number_of_steps=58,
+            variable=self._dead_var, progress_color=ACCENT_2,
+            button_color=ACCENT, button_hover_color="#6A9EFF",
             command=self._on_dead_changed,
         )
-        self._dead_slider.pack(padx=14, pady=(0, 16))
+        self._dead_slider.grid(row=5, column=0, sticky="ew", padx=16, pady=(4, 14))
+        self._on_mult_changed(self._mult_var.get())
+        self._on_dead_changed(self._dead_var.get())
 
-        # ── Status counters ───────────────────────────────────────────
+        transport = self._card(sidebar)
+        transport.grid(row=4, column=0, sticky="ew", padx=18, pady=(0, 18))
+        transport.grid_columnconfigure(0, weight=1)
+        button_row = ctk.CTkFrame(transport, fg_color="transparent")
+        button_row.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 8))
+        button_row.grid_columnconfigure((0, 1), weight=1)
+        self._start_btn = ctk.CTkButton(
+            button_row, text="Start", fg_color=SAFE, hover_color="#39BF68",
+            text_color="#081208", command=self._on_start,
+        )
+        self._start_btn.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self._stop_btn = ctk.CTkButton(
+            button_row, text="Stop", fg_color=DANGER, hover_color="#FF5959",
+            text_color="#220808", state="disabled", command=self._on_stop,
+        )
+        self._stop_btn.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self._transport_caption = ctk.CTkLabel(
+            transport, text="", justify="left", text_color=MUTED,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        )
+        self._transport_caption.grid(row=1, column=0, sticky="w", padx=16, pady=(4, 8))
+        self._transport_bar = ctk.CTkProgressBar(
+            transport, fg_color=PANEL_ALT, progress_color=ACCENT, height=14,
+        )
+        self._transport_bar.grid(row=2, column=0, sticky="ew", padx=16)
+        self._transport_bar.set(0)
+        self._transport_value = ctk.CTkLabel(
+            transport, text="00:00 / 00:00", text_color=MUTED,
+            font=ctk.CTkFont(family="Cascadia Code", size=12),
+        )
+        self._transport_value.grid(row=3, column=0, sticky="w", padx=16, pady=(8, 16))
+        self._on_source_changed("Live")
+
+    def _slider_block(self, parent, row: int, title: str, value_label) -> None:
         ctk.CTkLabel(
-            sidebar,
-            text="─── Session Stats ───",
-            font=ctk.CTkFont(size=11),
-            text_color=_CLR_TEXT_DIM,
-        ).pack(pady=(8, 4))
-        self._status_label = ctk.CTkLabel(
-            sidebar,
-            text="Alerts: 0  |  Suspicious: 0",
-            font=ctk.CTkFont(size=12),
+            parent, text=title, text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+        ).grid(row=row, column=0, sticky="w", padx=16, pady=(16, 4))
+        value_label.grid(row=row + 1, column=0, sticky="e", padx=16)
+
+    def _build_main(self) -> None:
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.grid(row=0, column=1, sticky="nsew", padx=18, pady=18)
+        main.grid_columnconfigure(0, weight=1)
+        main.grid_rowconfigure(2, weight=1)
+        main.grid_rowconfigure(3, weight=1)
+
+        header = self._card(main)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text="Detection Operations Console",
+            text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=28, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=24, pady=(20, 4))
+        ctk.CTkLabel(
+            header,
+            text="Premade files replay through the exact same live trigger and inference path.",
+            text_color=MUTED,
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+        ).grid(row=1, column=0, sticky="w", padx=24, pady=(0, 20))
+        self._status_chip = ctk.CTkLabel(
+            header, text="Idle", width=120, height=32, corner_radius=999,
+            fg_color=PANEL_ALT, text_color="#08101E",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
         )
-        self._status_label.pack(padx=14, anchor="w", pady=4)
-        self._elapsed_label = ctk.CTkLabel(
-            sidebar,
-            text="Elapsed: 0.0 s",
-            font=ctk.CTkFont(size=12),
-            text_color=_CLR_TEXT_DIM,
-        )
-        self._elapsed_label.pack(padx=14, anchor="w")
+        self._status_chip.grid(row=0, column=1, rowspan=2, padx=24, pady=20, sticky="e")
 
-    def _build_main_area(self) -> None:
-        """Construct the right-hand main area: plot canvas + event log."""
-        main = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        main.pack(side="right", fill="both", expand=True)
+        metrics = ctk.CTkFrame(main, fg_color="transparent")
+        metrics.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        for idx in range(4):
+            metrics.grid_columnconfigure(idx, weight=1)
+        self._metric_card(metrics, 0, "Alerts", "alerts")
+        self._metric_card(metrics, 1, "Suspicious", "suspicious")
+        self._metric_card(metrics, 2, "Source", "source")
+        self._metric_card(metrics, 3, "Classifier", "classifier")
 
-        # ── Top: Matplotlib canvas ────────────────────────────────────
-        plot_frame = ctk.CTkFrame(main, corner_radius=8)
-        plot_frame.pack(fill="both", expand=True, padx=10, pady=(10, 5))
-
-        self._fig = Figure(figsize=(9, 3), dpi=100, facecolor="#0e1117")
+        plot_panel = self._card(main)
+        plot_panel.grid(row=2, column=0, sticky="nsew", pady=(0, 14))
+        plot_panel.grid_columnconfigure(0, weight=1)
+        plot_panel.grid_rowconfigure(1, weight=1)
+        ctk.CTkLabel(
+            plot_panel, text="Energy timeline", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
+        self._fig = Figure(figsize=(11, 4.2), dpi=100, facecolor=PANEL)
         self._ax = self._fig.add_subplot(111)
-        self._setup_plot_axes()
+        self._setup_plot()
+        self._canvas = FigureCanvasTkAgg(self._fig, master=plot_panel)
+        self._canvas.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 14))
 
-        self._canvas = FigureCanvasTkAgg(self._fig, master=plot_frame)
-        self._canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # ── Bottom: Event log ─────────────────────────────────────────
-        log_header = ctk.CTkFrame(main, fg_color="transparent")
-        log_header.pack(fill="x", padx=10)
+        activity = self._card(main)
+        activity.grid(row=3, column=0, sticky="nsew")
+        activity.grid_columnconfigure(0, weight=1)
+        activity.grid_rowconfigure(1, weight=1)
+        top = ctk.CTkFrame(activity, fg_color="transparent")
+        top.grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
+        top.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            log_header,
-            text="📋  Event Log",
-            font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(side="left", pady=(4, 2))
-        self._clear_log_btn = ctk.CTkButton(
-            log_header,
-            text="Clear",
-            width=60,
-            height=24,
-            font=ctk.CTkFont(size=11),
-            command=self._clear_log,
+            top, text="Activity stream", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            top, text="Clear", width=72, fg_color=PANEL_ALT,
+            hover_color="#1D2942", command=self._clear_activity,
+        ).grid(row=0, column=1, sticky="e")
+        self._activity_box = ctk.CTkTextbox(
+            activity, fg_color=PANEL_ALT, border_width=1, border_color=BORDER,
+            text_color=TEXT, font=ctk.CTkFont(family="Cascadia Code", size=12),
         )
-        self._clear_log_btn.pack(side="right", padx=4, pady=(4, 2))
+        self._activity_box.grid(row=1, column=0, sticky="nsew", padx=16, pady=(0, 16))
+        self._activity_box.tag_config("danger", foreground=DANGER)
+        self._activity_box.tag_config("safe", foreground=SAFE)
+        self._activity_box.tag_config("info", foreground=MUTED)
 
-        self._log_box = ctk.CTkTextbox(
-            main,
-            height=200,
-            corner_radius=8,
-            font=ctk.CTkFont(family="Consolas", size=12),
-            state="disabled",
-            wrap="word",
+    def _build_inspector(self) -> None:
+        inspector = self._card(self, fg_color="#0F172A", radius=0)
+        inspector.grid(row=0, column=2, sticky="nsew")
+        inspector.grid_columnconfigure(0, weight=1)
+        card = self._card(inspector)
+        card.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
+        card.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            card, text="Detection inspector", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=22, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(18, 4))
+        ctk.CTkLabel(
+            card, text="Latest model decision and confidence trace.",
+            text_color=MUTED, font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 16))
+        self._latest_badge = ctk.CTkLabel(
+            card, text="NO DETECTION", height=42, corner_radius=14,
+            fg_color=PANEL_ALT, text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=18, weight="bold"),
         )
-        self._log_box.pack(fill="both", expand=False, padx=10, pady=(0, 10))
-
-        # Register text tags for colour coding
-        self._log_box.tag_config("alert", foreground=_CLR_ALERT_RED)
-        self._log_box.tag_config("safe", foreground=_CLR_ALERT_GREEN)
-        self._log_box.tag_config("info", foreground=_CLR_TEXT_DIM)
-
-    # ==================================================================
-    #  Plot helpers
-    # ==================================================================
-    def _setup_plot_axes(self) -> None:
-        """Configure Matplotlib axes styling (dark theme)."""
-        ax = self._ax
-        ax.set_facecolor("#0e1117")
-        ax.set_xlabel("Time (s)", color=_CLR_TEXT, fontsize=9)
-        ax.set_ylabel("RMS Energy", color=_CLR_TEXT, fontsize=9)
-        ax.set_title(
-            "Live RMS Energy  vs  Dynamic Threshold",
-            color=_CLR_TEXT,
-            fontsize=11,
-            fontweight="bold",
+        self._latest_badge.grid(row=2, column=0, sticky="ew", padx=18)
+        self._confidence_bar = ctk.CTkProgressBar(
+            card, fg_color=PANEL_ALT, progress_color=ACCENT, height=16,
         )
-        ax.tick_params(colors=_CLR_TEXT_DIM, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color("#333")
-        ax.set_xlim(0, _PLOT_HISTORY_SEC)
-        ax.set_ylim(0, 0.05)
-        # Create empty line objects for blitting-style update
-        (self._line_rms,) = ax.plot([], [], color=_CLR_PLOT_RMS, linewidth=1.0,
-                                    label="RMS Energy")
-        (self._line_thr,) = ax.plot([], [], color=_CLR_PLOT_THR, linewidth=1.0,
-                                    linestyle="--", label="Threshold")
-        ax.legend(loc="upper right", fontsize=8, facecolor="#1a1a2e",
-                  labelcolor=_CLR_TEXT, edgecolor="#333")
+        self._confidence_bar.grid(row=3, column=0, sticky="ew", padx=18, pady=(18, 8))
+        self._confidence_bar.set(0)
+        self._confidence_value = ctk.CTkLabel(
+            card, text="Confidence 0.000", text_color=TEXT,
+            font=ctk.CTkFont(family="Cascadia Code", size=13),
+        )
+        self._confidence_value.grid(row=4, column=0, sticky="w", padx=18)
+        self._detail_label = ctk.CTkLabel(
+            card, text="Waiting for a trigger", justify="left", text_color=MUTED,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        )
+        self._detail_label.grid(row=5, column=0, sticky="w", padx=18, pady=(12, 16))
+        self._topk_box = ctk.CTkTextbox(
+            card, fg_color=PANEL_ALT, border_width=1, border_color=BORDER,
+            text_color=TEXT, font=ctk.CTkFont(family="Cascadia Code", size=12),
+            height=220,
+        )
+        self._topk_box.grid(row=6, column=0, sticky="nsew", padx=18, pady=(0, 18))
+
+    def _metric_card(self, parent, column: int, title: str, key: str) -> None:
+        card = self._card(parent)
+        card.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 8, 8 if column < 3 else 0))
+        ctk.CTkLabel(
+            card, text=title, text_color=MUTED,
+            font=ctk.CTkFont(family="Segoe UI", size=12),
+        ).pack(anchor="w", padx=18, pady=(16, 6))
+        value = ctk.CTkLabel(
+            card, text="-", text_color=TEXT,
+            font=ctk.CTkFont(family="Segoe UI", size=28, weight="bold"),
+        )
+        value.pack(anchor="w", padx=18, pady=(0, 16))
+        self._metric_labels[key] = value
+
+    def _setup_plot(self) -> None:
+        self._ax.set_facecolor(PANEL_ALT)
+        for spine in self._ax.spines.values():
+            spine.set_color(BORDER)
+        self._ax.tick_params(colors=MUTED, labelsize=9)
+        self._ax.set_xlabel("Time (s)", color=TEXT)
+        self._ax.set_ylabel("Energy", color=TEXT)
+        self._ax.grid(color="#20304A", alpha=0.45, linewidth=0.8)
+        self._ax.set_xlim(0, PLOT_HISTORY_SEC)
+        self._ax.set_ylim(0, 0.05)
+        (self._rms_line,) = self._ax.plot([], [], color=RMS, linewidth=1.8)
+        (self._thr_line,) = self._ax.plot([], [], color=THRESH, linewidth=1.5, linestyle="--")
+        self._markers = self._ax.scatter([], [], s=64, color=DANGER, edgecolors="#FFD7D7", linewidths=1.0, zorder=5)
         self._fig.tight_layout()
 
-    def _animate_plot(self) -> None:
-        """Redraw the scrolling RMS / threshold lines (~12 FPS).
+    def _set_metric(self, key: str, value: str) -> None:
+        if key in self._metric_labels:
+            self._metric_labels[key].configure(text=value)
 
-        Scheduled via ``root.after()`` so it only touches the canvas
-        on the main thread.
-        """
-        if not self._is_streaming:
-            return
+    def _set_status(self, text: str, color: str) -> None:
+        self._status_chip.configure(text=text, fg_color=color)
 
-        if self._time_buf:
-            self._line_rms.set_data(self._time_buf, self._rms_buf)
-            self._line_thr.set_data(self._time_buf, self._thr_buf)
-
-            t_max = self._time_buf[-1]
-            t_min = max(0, t_max - _PLOT_HISTORY_SEC)
-            self._ax.set_xlim(t_min, t_min + _PLOT_HISTORY_SEC)
-
-            # Auto-scale y
-            visible_rms = [
-                v
-                for t, v in zip(self._time_buf, self._rms_buf)
-                if t >= t_min
-            ]
-            visible_thr = [
-                v
-                for t, v in zip(self._time_buf, self._thr_buf)
-                if t >= t_min
-            ]
-            if visible_rms:
-                y_max = max(max(visible_rms), max(visible_thr)) * 1.3
-                y_max = max(y_max, 0.01)
-                self._ax.set_ylim(0, y_max)
-
-            self._canvas.draw_idle()
-
-        # Update elapsed
-        elapsed = time.monotonic() - self._stream_start
-        self._elapsed_label.configure(text=f"Elapsed: {elapsed:.1f} s")
-
-        # Re-schedule
-        self.after(_PLOT_INTERVAL_MS, self._animate_plot)
-
-    # ==================================================================
-    #  GUI-queue poller (inference thread → main thread)
-    # ==================================================================
-    def _poll_gui_queue(self) -> None:
-        """Drain the gui_queue and insert results into the log box.
-
-        Scheduled via ``root.after()`` – safe to update Tk widgets.
-        """
-        while True:
-            try:
-                result: ClassificationResult = self._gui_queue.get_nowait()
-            except queue.Empty:
-                break
-            self._insert_log_entry(result)
-
-        if self._is_streaming:
-            self.after(_QUEUE_POLL_MS, self._poll_gui_queue)
-
-    def _insert_log_entry(self, result: ClassificationResult) -> None:
-        """Format and insert a ClassificationResult into the log box.
-
-        Parameters
-        ----------
-        result : ClassificationResult
-            Detection to display.
-        """
-        self._total_alerts += 1
-        if result.is_suspicious:
-            self._suspicious_alerts += 1
-            tag = "alert"
-            prefix = "🚨 ALERT"
+    def _on_source_changed(self, value: str) -> None:
+        if value == "File":
+            self._file_frame.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 0))
+            self._set_metric("source", "FILE")
         else:
-            tag = "safe"
-            prefix = "✅ SAFE "
-
-        top3 = "  ".join(
-            f"{e['class']}({e['score']:.2f})" for e in result.top_k[:3]
-        )
-        line = (
-            f"[{result.timestamp:7.2f}s]  {prefix}  "
-            f"{result.label}  conf={result.confidence:.3f}  "
-            f"| {top3}\n"
-        )
-
-        self._log_box.configure(state="normal")
-        self._log_box.insert("end", line, tag)
-        self._log_box.see("end")
-        self._log_box.configure(state="disabled")
-
-        # Update counters
-        self._status_label.configure(
-            text=(
-                f"Alerts: {self._total_alerts}  |  "
-                f"Suspicious: {self._suspicious_alerts}"
-            )
-        )
-
-        # Persist to JSONL
-        if self._log_path:
-            with self._log_path.open("a", encoding="utf-8") as fh:
-                fh.write(result.to_json() + "\n")
-
-    # ==================================================================
-    #  Sidebar callbacks
-    # ==================================================================
-    def _on_input_mode_changed(self, value: str) -> None:
-        """Show / hide the WAV file chooser based on the dropdown.
-
-        Parameters
-        ----------
-        value : str
-            Selected dropdown value.
-        """
-        if value == "WAV File Playback":
-            self._wav_frame.pack(padx=14, pady=(0, 4), fill="x", after=self._input_dropdown)
-        else:
-            self._wav_frame.pack_forget()
+            self._file_frame.grid_forget()
+            self._set_metric("source", "MIC")
+        self._refresh_transport()
 
     def _browse_wav(self) -> None:
-        """Open a file dialog for choosing a WAV file."""
         from tkinter import filedialog
 
         path = filedialog.askopenfilename(
@@ -493,150 +461,176 @@ class DetectionGUI(ctk.CTk):
             filetypes=[("WAV files", "*.wav"), ("All files", "*.*")],
         )
         if path:
-            self._wav_path_var.set(path)
+            self._file_path_var.set(path)
+            self._source_name = Path(path).name
+            self._refresh_transport()
 
     def _on_mult_changed(self, value: float) -> None:
-        """Update the energy multiplier on the live StreamMonitor.
-
-        Parameters
-        ----------
-        value : float
-            New multiplier value from the slider.
-        """
-        self._mult_label.configure(text=f"{value:.1f}×")
+        self._mult_label.configure(text=f"{value:.1f}x")
         if self._monitor is not None:
             self._monitor.energy_multiplier = value
 
     def _on_dead_changed(self, value: float) -> None:
-        """Update the dead-time on the live StreamMonitor.
-
-        Parameters
-        ----------
-        value : float
-            New dead-time value in seconds.
-        """
-        self._dead_label.configure(text=f"{value:.2f} s")
+        self._dead_label.configure(text=f"{value:.2f}s")
         if self._monitor is not None:
             self._monitor.min_retrigger_sec = value
 
-    # ==================================================================
-    #  Start / Stop
-    # ==================================================================
+    def _build_classifier(self) -> object:
+        mode = self._classifier_var.get()
+        self._set_metric("classifier", mode.upper())
+        if mode == "cnn":
+            model = CNNClassifier(
+                model_path=str(config.CNN_MODEL_PATH),
+                decision_threshold=config.CNN_DECISION_THRESHOLD,
+                feature_type=config.CNN_FEATURE_TYPE,
+            )
+            model._ensure_model()
+            return model
+        if mode == "yamnet":
+            model = YAMNetClassifier()
+            model._ensure_model()
+            return model
+
+        cnn = CNNClassifier(
+            model_path=str(config.CNN_MODEL_PATH),
+            decision_threshold=config.CNN_DECISION_THRESHOLD,
+            feature_type=config.CNN_FEATURE_TYPE,
+        )
+        yamnet = YAMNetClassifier()
+        cnn._ensure_model()
+        yamnet._ensure_model()
+        return [cnn, yamnet]
+
     def _on_start(self) -> None:
-        """Start the audio stream and inference worker."""
         if self._is_streaming:
             return
 
-        mode = self._input_var.get()
+        self._reset_runtime()
+        source_mode = self._source_var.get()
+        wav_path: Optional[Path] = None
+        if source_mode == "File":
+            wav_path = Path(self._file_path_var.get().strip())
+            if not wav_path.exists():
+                self._log_system("Choose a valid WAV file before starting.")
+                self._set_status("No File", WARN)
+                return
 
-        # ── Build fresh pipeline components ───────────────────────────
         self._monitor = StreamMonitor(
             energy_multiplier=self._mult_var.get(),
             min_retrigger_sec=self._dead_var.get(),
         )
-        self._classifier = YAMNetClassifier()
 
-        # Reset buffers and counters
-        self._rms_buf.clear()
-        self._thr_buf.clear()
-        self._time_buf.clear()
-        self._total_alerts = 0
-        self._suspicious_alerts = 0
-        self._status_label.configure(text="Alerts: 0  |  Suspicious: 0")
+        try:
+            self._log_system("Loading classifier stack...")
+            self._classifier = self._build_classifier()
+        except Exception as exc:
+            logger.exception("Failed to initialize classifier")
+            self._log_system(f"Classifier load failed: {exc}")
+            self._set_status("Load Failed", WARN)
+            return
 
-        # Pre-load YAMNet (show a temporary status)
-        self._log_info("Loading YAMNet model …")
-        self.update_idletasks()
-        self._classifier._ensure_model()
-        self._log_info("YAMNet loaded ✓")
-
-        # Start inference worker thread
         self._worker_stop.clear()
         self._worker_thread = threading.Thread(
             target=self._inference_loop,
-            name="gui-yamnet-worker",
+            name="gui-inference-worker",
             daemon=True,
         )
         self._worker_thread.start()
 
-        # Start audio source
         self._stream_start = time.monotonic()
         self._is_streaming = True
+        self._toggle_controls(running=True)
+        self._set_status("Armed", SAFE)
 
-        if mode == "Live Microphone":
-            self._start_mic_stream()
+        try:
+            if source_mode == "Live":
+                self._source_name = "Microphone"
+                self._source_duration_sec = 0.0
+                self._start_mic_stream()
+            else:
+                self._source_name = wav_path.name
+                self._start_wav_playback(wav_path)
+        except Exception as exc:
+            logger.exception("Failed to start source")
+            self._log_system(f"Could not start source: {exc}")
+            self._on_stop()
+            self._set_status("Source Error", WARN)
+            return
+
+        if source_mode == "Live":
+            self._source_name = "Microphone"
         else:
-            wav_path = self._wav_path_var.get().strip()
-            if not wav_path or not Path(wav_path).exists():
-                self._log_info("⚠ WAV file not found – aborting.")
-                self._is_streaming = False
-                return
-            self._start_wav_playback(Path(wav_path))
+            self._source_name = wav_path.name
 
-        # Toggle button states
-        self._start_btn.configure(state="disabled")
-        self._stop_btn.configure(state="normal")
-        self._input_dropdown.configure(state="disabled")
-
-        # Start scheduled loops
-        self.after(_QUEUE_POLL_MS, self._poll_gui_queue)
-        self.after(_PLOT_INTERVAL_MS, self._animate_plot)
+        self.after(QUEUE_POLL_MS, self._poll_gui_queue)
+        self.after(PLOT_INTERVAL_MS, self._animate_plot)
+        self._log_system(f"Stream started on {self._source_name}.")
 
     def _on_stop(self) -> None:
-        """Stop all threads and the audio stream."""
+        if not self._is_streaming and self._sd_stream is None and self._sd_output is None:
+            return
+
         self._is_streaming = False
+        self._worker_stop.set()
 
-        # Stop sounddevice stream
-        if self._sd_stream is not None:
-            try:
-                self._sd_stream.stop()
-                self._sd_stream.close()
-            except Exception:
-                pass
-            self._sd_stream = None
+        for attr in ("_sd_stream", "_sd_output"):
+            stream = getattr(self, attr)
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
-        # Stop output playback stream
-        if self._sd_output is not None:
-            try:
-                self._sd_output.stop()
-                self._sd_output.close()
-            except Exception:
-                pass
-            self._sd_output = None
-
-        # Stop WAV playback thread
         if self._wav_thread is not None:
             self._wav_thread.join(timeout=2.0)
             self._wav_thread = None
 
-        # Stop inference worker
-        self._worker_stop.set()
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=3.0)
             self._worker_thread = None
 
-        # Toggle buttons
-        self._start_btn.configure(state="normal")
-        self._stop_btn.configure(state="disabled")
-        self._input_dropdown.configure(state="normal")
-
-        elapsed = time.monotonic() - self._stream_start
-        self._log_info(
-            f"Stream stopped.  Duration: {elapsed:.1f}s  |  "
-            f"Alerts: {self._total_alerts}  |  "
-            f"Suspicious: {self._suspicious_alerts}"
+        self._toggle_controls(running=False)
+        self._set_status("Idle", MUTED)
+        self._refresh_transport(finalize=True)
+        self._log_system(
+            f"Stream stopped. Alerts={self._total_alerts}, Suspicious={self._suspicious_alerts}"
         )
 
-    # ==================================================================
-    #  Audio sources
-    # ==================================================================
+    def _toggle_controls(self, *, running: bool) -> None:
+        self._start_btn.configure(state="disabled" if running else "normal")
+        self._stop_btn.configure(state="normal" if running else "disabled")
+        self._classifier_menu.configure(state="disabled" if running else "normal")
+        self._source_switch.configure(state="disabled" if running else "normal")
+        entry_state = "disabled" if running else "normal"
+        self._file_entry.configure(state=entry_state)
+        self._file_button.configure(state=entry_state)
+
+    def _reset_runtime(self) -> None:
+        self._rms_buf.clear()
+        self._thr_buf.clear()
+        self._time_buf.clear()
+        self._marker_times.clear()
+        self._marker_levels.clear()
+        self._source_duration_sec = 0.0
+        self._source_position_sec = 0.0
+        self._total_alerts = 0
+        self._suspicious_alerts = 0
+        self._last_result = None
+        self._set_metric("alerts", "0")
+        self._set_metric("suspicious", "0")
+        self._latest_badge.configure(text="NO DETECTION", fg_color=PANEL_ALT, text_color=TEXT)
+        self._confidence_bar.set(0)
+        self._confidence_value.configure(text="Confidence 0.000")
+        self._detail_label.configure(text="Waiting for a trigger")
+        self._topk_box.delete("1.0", "end")
+
     def _start_mic_stream(self) -> None:
-        """Open a sounddevice InputStream for the default microphone."""
         if sd is None:
-            self._log_info("⚠ sounddevice not installed – cannot open mic.")
+            self._log_system("sounddevice is not installed. Microphone mode is unavailable.")
             self._on_stop()
             return
-
         self._sd_stream = sd.InputStream(
             samplerate=config.SAMPLE_RATE,
             blocksize=1024,
@@ -645,148 +639,108 @@ class DetectionGUI(ctk.CTk):
             callback=self._audio_callback,
         )
         self._sd_stream.start()
-        self._log_info("🎙  Microphone stream started")
 
-    def _audio_callback(
-        self,
-        indata: np.ndarray,
-        frames: int,
-        time_info,
-        status,
-    ) -> None:
-        """sounddevice callback – runs on the PortAudio thread.
-
-        Feeds audio into the StreamMonitor and updates the plot data
-        buffers.  Must be fast – no Tk widget access here.
-
-        Parameters
-        ----------
-        indata : np.ndarray
-            Audio block ``(frames, 1)``.
-        frames : int
-            Number of frames.
-        time_info
-            PortAudio timing info (unused).
-        status
-            PortAudio status flags.
-        """
+    def _audio_callback(self, indata: np.ndarray, frames: int, time_info, status) -> None:
+        del frames, time_info
         if status:
             logger.warning("sounddevice status: %s", status)
-        chunk = indata[:, 0].astype(np.float32)
-        self._feed_and_record(chunk)
+        self._feed_and_record(indata[:, 0].astype(np.float32))
 
     def _start_wav_playback(self, wav_path: Path) -> None:
-        """Load a WAV file and stream it in a background thread.
+        waveform, sr = load_wav(wav_path)
+        self._source_duration_sec = len(waveform) / float(sr)
+        self._source_position_sec = 0.0
 
-        Parameters
-        ----------
-        wav_path : Path
-            Path to the ``.wav`` file.
-        """
-        # Open an output stream so the user can hear the WAV file
         if sd is not None:
             try:
                 self._sd_output = sd.OutputStream(
-                    samplerate=config.SAMPLE_RATE,
+                    samplerate=sr,
                     channels=1,
                     dtype="float32",
                 )
                 self._sd_output.start()
             except Exception as exc:
-                logger.warning("Cannot open audio output: %s", exc)
+                logger.warning("Could not open playback device: %s", exc)
                 self._sd_output = None
 
         self._wav_thread = threading.Thread(
             target=self._wav_feeder,
-            args=(wav_path,),
-            name="wav-feeder",
+            args=(waveform, sr),
+            name="wav-replay-thread",
             daemon=True,
         )
         self._wav_thread.start()
-        self._log_info(f"📂  Playing {wav_path.name}")
 
-    def _wav_feeder(self, wav_path: Path) -> None:
-        """Background thread: read WAV file and feed in real-time chunks.
-
-        Parameters
-        ----------
-        wav_path : Path
-            Path to the WAV file.
-        """
-        try:
-            waveform, sr = load_wav(wav_path)
-        except Exception as exc:
-            logger.error("Failed to load %s: %s", wav_path, exc)
-            return
-
+    def _wav_feeder(self, waveform: np.ndarray, sr: int) -> None:
         chunk_size = 1024
-        # Simulate real-time playback speed
-        chunk_duration = chunk_size / sr
+        chunk_duration = chunk_size / float(sr)
         offset = 0
         while offset < len(waveform) and self._is_streaming:
             end = min(offset + chunk_size, len(waveform))
             chunk = waveform[offset:end]
+            self._source_position_sec = end / float(sr)
             self._feed_and_record(chunk)
-            # Play audio through speakers
             if self._sd_output is not None:
                 try:
                     self._sd_output.write(chunk.reshape(-1, 1))
                 except Exception:
-                    pass  # output closed during stop
+                    pass
             else:
                 time.sleep(chunk_duration)
             offset = end
 
-        # Signal end of file on the GUI thread via queue
+        self._source_position_sec = self._source_duration_sec
         if self._is_streaming:
-            # Schedule stop from main thread
             self.after(100, self._on_stop)
 
     def _feed_and_record(self, chunk: np.ndarray) -> None:
-        """Feed a chunk into StreamMonitor and record plot data.
-
-        Thread-safe – called from audio or WAV-feeder threads.
-
-        Parameters
-        ----------
-        chunk : np.ndarray
-            1-D float32 audio.
-        """
         if self._monitor is None:
             return
-        self._monitor.feed(chunk)
 
-        # Snapshot latest RMS / baseline for the plot
-        if self._monitor._rms_history:
-            rms = self._monitor._rms_history[-1]
-        else:
-            rms = 0.0
+        self._monitor.feed(chunk)
+        rms = self._monitor._rms_history[-1] if self._monitor._rms_history else 0.0
         baseline = self._monitor._rolling_mean()
         threshold = baseline * self._monitor.energy_multiplier
-        elapsed = time.monotonic() - self._stream_start
+        elapsed = time.monotonic() - self._stream_start if self._stream_start else 0.0
 
         self._rms_buf.append(rms)
         self._thr_buf.append(threshold)
         self._time_buf.append(elapsed)
-
-        # Trim to keep memory bounded
         if len(self._rms_buf) > self._plot_maxlen:
             trim = len(self._rms_buf) - self._plot_maxlen
             del self._rms_buf[:trim]
             del self._thr_buf[:trim]
             del self._time_buf[:trim]
 
-    # ==================================================================
-    #  Inference worker (background thread)
-    # ==================================================================
-    def _inference_loop(self) -> None:
-        """Drain trigger_queue, run YAMNet, push results to gui_queue.
+    def _classify_trigger(self, trigger) -> ClassificationResult:
+        if isinstance(self._classifier, list):
+            results = [
+                model.classify(
+                    waveform=trigger.window,
+                    timestamp=trigger.timestamp_sec,
+                    onset_index=trigger.onset_index,
+                )
+                for model in self._classifier
+            ]
+            primary = results[0]
+            primary.is_suspicious = all(result.is_suspicious for result in results)
+            primary.confidence = float(np.mean([result.confidence for result in results]))
+            primary.label = "GUNSHOT" if primary.is_suspicious else "NOGUN"
+            if primary.confidence >= 0.85:
+                primary.severity = "HIGH"
+            elif primary.confidence >= 0.6:
+                primary.severity = "MEDIUM"
+            else:
+                primary.severity = "LOW"
+            return primary
 
-        Runs on a daemon thread.  Never touches Tk widgets directly;
-        results are sent via ``self._gui_queue`` and picked up by
-        ``_poll_gui_queue`` on the main thread.
-        """
-        logger.info("GUI inference loop started")
+        return self._classifier.classify(
+            waveform=trigger.window,
+            timestamp=trigger.timestamp_sec,
+            onset_index=trigger.onset_index,
+        )
+
+    def _inference_loop(self) -> None:
         while not self._worker_stop.is_set():
             if self._monitor is None:
                 time.sleep(0.05)
@@ -795,76 +749,171 @@ class DetectionGUI(ctk.CTk):
                 trigger = self._monitor.trigger_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
-
             try:
-                result = self._classifier.classify(
-                    waveform=trigger.window,
-                    timestamp=trigger.timestamp_sec,
-                    onset_index=trigger.onset_index,
-                )
-                self._gui_queue.put(result)
+                self._gui_queue.put(self._classify_trigger(trigger))
             except Exception:
-                logger.exception("Inference failed for trigger at t=%.2f",
-                                 trigger.timestamp_sec)
+                logger.exception("Inference failed for trigger at %.3fs", trigger.timestamp_sec)
 
-        # Drain remaining
-        if self._monitor is not None:
-            while not self._monitor.trigger_queue.empty():
-                try:
-                    trigger = self._monitor.trigger_queue.get_nowait()
-                except queue.Empty:
-                    break
-                try:
-                    result = self._classifier.classify(
-                        waveform=trigger.window,
-                        timestamp=trigger.timestamp_sec,
-                        onset_index=trigger.onset_index,
-                    )
-                    self._gui_queue.put(result)
-                except Exception:
-                    pass
+    def _poll_gui_queue(self) -> None:
+        while True:
+            try:
+                result = self._gui_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_result(result)
 
-        logger.info("GUI inference loop exiting")
+        if self._is_streaming:
+            self.after(QUEUE_POLL_MS, self._poll_gui_queue)
 
-    # ==================================================================
-    #  Utility helpers
-    # ==================================================================
-    def _log_info(self, text: str) -> None:
-        """Insert an informational line into the log box.
+    def _handle_result(self, result: ClassificationResult) -> None:
+        self._last_result = result
+        self._total_alerts += 1
+        if result.is_suspicious:
+            self._suspicious_alerts += 1
 
-        Parameters
-        ----------
-        text : str
-            Message to display.
-        """
-        self._log_box.configure(state="normal")
-        self._log_box.insert("end", f"  ℹ  {text}\n", "info")
-        self._log_box.see("end")
-        self._log_box.configure(state="disabled")
+        self._set_metric("alerts", str(self._total_alerts))
+        self._set_metric("suspicious", str(self._suspicious_alerts))
 
-    def _clear_log(self) -> None:
-        """Clear all text in the event log box."""
-        self._log_box.configure(state="normal")
-        self._log_box.delete("1.0", "end")
-        self._log_box.configure(state="disabled")
+        level = (self._thr_buf[-1] if self._thr_buf else max(result.confidence, 0.01)) * 1.05
+        self._marker_times.append(result.timestamp)
+        self._marker_levels.append(level)
+        self._marker_times = self._marker_times[-MAX_MARKERS:]
+        self._marker_levels = self._marker_levels[-MAX_MARKERS:]
+
+        badge_text = "SUSPICIOUS EVENT" if result.is_suspicious else "NON-THREAT EVENT"
+        badge_color = DANGER if result.is_suspicious else SAFE
+        self._latest_badge.configure(text=badge_text, fg_color=badge_color, text_color="#08101E")
+        self._confidence_bar.set(min(max(result.confidence, 0.0), 1.0))
+        self._confidence_bar.configure(progress_color=_severity_color(result.severity))
+        self._confidence_value.configure(text=f"Confidence {result.confidence:.3f}")
+        self._detail_label.configure(
+            text=(
+                f"Label: {result.label}\n"
+                f"Severity: {result.severity}\n"
+                f"Timestamp: {result.timestamp:.3f}s\n"
+                f"Source: {self._source_name}"
+            )
+        )
+
+        self._topk_box.delete("1.0", "end")
+        if result.top_k:
+            lines = [
+                f"{idx + 1}. {entry['class']:<24} {entry['score']:.4f}"
+                for idx, entry in enumerate(result.top_k[:5])
+            ]
+            self._topk_box.insert("end", "\n".join(lines))
+        else:
+            self._topk_box.insert("end", "No alternate class scores available.")
+
+        self._log_result(result)
+        if self._log_path:
+            with self._log_path.open("a", encoding="utf-8") as fh:
+                fh.write(result.to_json() + "\n")
+
+    def _log_result(self, result: ClassificationResult) -> None:
+        tag = "danger" if result.is_suspicious else "safe"
+        kind = "SUSPICIOUS" if result.is_suspicious else "SAFE"
+        line = (
+            f"[{result.timestamp:7.2f}s] {kind:<10} "
+            f"{result.label:<12} conf={result.confidence:.3f} "
+            f"severity={result.severity}\n"
+        )
+        self._activity_box.insert("end", line, tag)
+        if result.top_k:
+            summary = " | ".join(
+                f"{entry['class']} {entry['score']:.2f}" for entry in result.top_k[:3]
+            )
+            self._activity_box.insert("end", f"           top: {summary}\n", "info")
+        self._activity_box.see("end")
+        line_count = int(self._activity_box.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            self._activity_box.delete("1.0", f"{line_count - MAX_LOG_LINES}.0")
+
+    def _log_system(self, text: str) -> None:
+        self._activity_box.insert("end", f"[system] {text}\n", "info")
+        self._activity_box.see("end")
+
+    def _refresh_transport(self, finalize: bool = False) -> None:
+        if self._is_streaming and self._source_var.get() == "Live":
+            elapsed = time.monotonic() - self._stream_start if self._stream_start else 0.0
+            self._transport_caption.configure(
+                text="Live microphone\nMonitoring and plotting the trigger stream in real time"
+            )
+            self._transport_value.configure(text=f"{_fmt_time(elapsed)} / LIVE")
+            self._transport_bar.set(1.0)
+            self._transport_bar.configure(progress_color=ACCENT_2)
+            return
+
+        if self._source_var.get() == "File" and self._source_duration_sec > 0:
+            position = self._source_duration_sec if finalize else min(
+                self._source_position_sec, self._source_duration_sec
+            )
+            progress = position / self._source_duration_sec if self._source_duration_sec else 0.0
+            self._transport_caption.configure(
+                text=f"{self._source_name}\nReplaying the file through the same live detector path"
+            )
+            self._transport_value.configure(
+                text=f"{_fmt_time(position)} / {_fmt_time(self._source_duration_sec)}"
+            )
+            self._transport_bar.set(progress)
+            self._transport_bar.configure(progress_color=ACCENT)
+            return
+
+        source_label = "Microphone" if self._source_var.get() == "Live" else (self._source_name or "WAV replay")
+        self._transport_caption.configure(
+            text=f"{source_label}\nReady for live monitoring or real-time file replay"
+        )
+        self._transport_value.configure(text="00:00 / 00:00")
+        self._transport_bar.set(0)
+        self._transport_bar.configure(progress_color=ACCENT)
+
+    def _animate_plot(self) -> None:
+        if not self._is_streaming:
+            return
+
+        if self._time_buf:
+            self._rms_line.set_data(self._time_buf, self._rms_buf)
+            self._thr_line.set_data(self._time_buf, self._thr_buf)
+
+            current_max = self._time_buf[-1]
+            x_min = max(0.0, current_max - PLOT_HISTORY_SEC)
+            self._ax.set_xlim(x_min, x_min + PLOT_HISTORY_SEC)
+
+            visible = [
+                value
+                for time_list, value_list in ((self._time_buf, self._rms_buf), (self._time_buf, self._thr_buf))
+                for time_value, value in zip(time_list, value_list)
+                if time_value >= x_min
+            ]
+            self._ax.set_ylim(0, max((max(visible) * 1.25) if visible else 0.05, 0.01))
+
+            markers = [
+                (time_value, level)
+                for time_value, level in zip(self._marker_times, self._marker_levels)
+                if time_value >= x_min
+            ]
+            self._markers.set_offsets(np.array(markers) if markers else np.empty((0, 2)))
+            self._canvas.draw_idle()
+
+        if self._last_result is None:
+            self._set_status("Armed", SAFE)
+        elif self._last_result.is_suspicious:
+            self._set_status("Threat", DANGER)
+        else:
+            self._set_status("Monitoring", SAFE)
+
+        self._refresh_transport()
+        self.after(PLOT_INTERVAL_MS, self._animate_plot)
+
+    def _clear_activity(self) -> None:
+        self._activity_box.delete("1.0", "end")
 
     def _on_close(self) -> None:
-        """Handle the window-close event gracefully."""
-        if self._is_streaming:
+        if self._is_streaming or self._sd_stream is not None or self._sd_output is not None:
             self._on_stop()
         self.destroy()
 
 
-# ======================================================================
-#  Module-level launcher (called from main.py)
-# ======================================================================
 def launch_gui(log_path: Optional[str] = None) -> None:
-    """Create and run the detection GUI.
-
-    Parameters
-    ----------
-    log_path : str | None
-        Optional JSONL log file path.
-    """
-    app = DetectionGUI(log_path=log_path)
-    app.mainloop()
+    """Create and run the graphical dashboard."""
+    DetectionGUI(log_path=log_path).mainloop()

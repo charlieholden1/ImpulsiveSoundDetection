@@ -35,13 +35,14 @@ import queue
 import threading
 import time
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 import numpy as np
 
 from . import config
-from .classifier import ClassificationResult, YAMNetClassifier
+from .classifier import ClassificationResult, YAMNetClassifier, CNNClassifier
 from .data_loader import load_wav
+from .event_logger import EventLogger
 from .stream_monitor import StreamMonitor, TriggerEvent
 from .visualizer import plot_detections
 
@@ -55,24 +56,57 @@ class DetectionPipeline:
     ----------
     monitor : StreamMonitor | None
         Custom monitor instance.  If ``None`` a default one is created.
-    classifier : YAMNetClassifier | None
+    classifier : YAMNetClassifier | CNNClassifier | None
         Custom classifier instance.  If ``None`` a default one is
-        created.
+        created based on config.CLASSIFIER_MODE.
     log_path : Path | None
         If given, each JSON detection line is appended to this file.
+    classifier_mode : str
+        One of: "cnn", "yamnet", "ensemble". Ignored if classifier is provided.
     """
 
     def __init__(
         self,
         monitor: Optional[StreamMonitor] = None,
-        classifier: Optional[YAMNetClassifier] = None,
+        classifier: Optional[Union[YAMNetClassifier, CNNClassifier]] = None,
         log_path: Optional[Path] = None,
+        classifier_mode: Optional[str] = None,
     ) -> None:
         self.monitor = monitor or StreamMonitor()
-        self.classifier = classifier or YAMNetClassifier()
+
+        # Initialize classifier based on mode if not provided
+        if classifier is not None:
+            self.classifier = classifier
+        else:
+            mode = classifier_mode or config.CLASSIFIER_MODE
+            if mode == "cnn":
+                logger.info("Using CNN classifier")
+                self.classifier = CNNClassifier(
+                    model_path=str(config.CNN_MODEL_PATH),
+                    decision_threshold=config.CNN_DECISION_THRESHOLD,
+                )
+            elif mode == "ensemble":
+                logger.info("Using ensemble classifier (CNN + YAMNet)")
+                self.classifier = [
+                    CNNClassifier(
+                        model_path=str(config.CNN_MODEL_PATH),
+                        decision_threshold=config.CNN_DECISION_THRESHOLD,
+                    ),
+                    YAMNetClassifier(),
+                ]
+            else:  # yamnet or default
+                logger.info("Using YAMNet classifier")
+                self.classifier = YAMNetClassifier()
+
         self._log_path = Path(log_path) if log_path else None
         self._results: List[ClassificationResult] = []
         self._results_lock = threading.Lock()
+
+        # Event logger for SQLite + JSONL
+        self._event_logger = EventLogger(
+            sqlite_path=config.SQLITE_LOG_PATH,
+            jsonl_path=self._log_path,
+        )
 
         # Inference worker state (used in live mode)
         self._worker_thread: Optional[threading.Thread] = None
@@ -209,11 +243,32 @@ class DetectionPipeline:
         ClassificationResult
         """
         t0 = time.monotonic()
-        result = self.classifier.classify(
-            waveform=trigger.window,
-            timestamp=trigger.timestamp_sec,
-            onset_index=trigger.onset_index,
-        )
+
+        # Handle ensemble mode (list of classifiers)
+        if isinstance(self.classifier, list):
+            # Ensemble: CNN AND YAMNet (both must agree)
+            results = [
+                c.classify(
+                    waveform=trigger.window,
+                    timestamp=trigger.timestamp_sec,
+                    onset_index=trigger.onset_index,
+                )
+                for c in self.classifier
+            ]
+            # Combine: is_suspicious only if BOTH agree
+            is_suspicious = all(r.is_suspicious for r in results)
+            # Use CNN result as primary, note ensemble decision
+            result = results[0]
+            result.is_suspicious = is_suspicious
+            result.label = "GUNSHOT" if is_suspicious else "NOGUN"
+        else:
+            # Single classifier (CNN or YAMNet)
+            result = self.classifier.classify(
+                waveform=trigger.window,
+                timestamp=trigger.timestamp_sec,
+                onset_index=trigger.onset_index,
+            )
+
         elapsed = time.monotonic() - t0
         if elapsed > config.INFERENCE_TIMEOUT_SEC:
             logger.warning(
@@ -240,11 +295,11 @@ class DetectionPipeline:
             self._emit(result)
 
     def _emit(self, result: ClassificationResult) -> None:
-        """Emit a detection result via callback, print, and log file.
+        """Emit a detection result via callback, print, and log.
 
         If a dashboard callback is registered (live mode) it is
         called *instead* of the plain ``print()``, keeping the
-        terminal output clean.
+        terminal output clean. Event is logged to both SQLite and JSONL.
 
         Parameters
         ----------
@@ -260,11 +315,11 @@ class DetectionPipeline:
         else:
             print(result.to_json())
 
-        # Append to JSONL log regardless of mode
-        if self._log_path:
-            json_line = result.to_json()
-            with self._log_path.open("a", encoding="utf-8") as fh:
-                fh.write(json_line + "\n")
+        # Log to SQLite + JSONL via EventLogger
+        try:
+            self._event_logger.log(result)
+        except Exception:
+            logger.exception("Failed to log event")
 
     # ── threaded inference worker (live mode) ─────────────────────────
     def start_inference_worker(

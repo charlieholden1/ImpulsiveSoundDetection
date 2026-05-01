@@ -39,7 +39,7 @@ YAMNET_WINDOW_SAMPLES: int = int(SAMPLE_RATE * YAMNET_WINDOW_SEC)  # 15600
 # ──────────────────────────────────────────────────────────────────────
 RMS_FRAME_SIZE: int = 512          # sliding-window hop for RMS
 ROLLING_WINDOW_SEC: float = 10.0   # seconds of history for baseline
-ENERGY_MULTIPLIER: float = 3.0     # trigger when energy > N × baseline
+ENERGY_MULTIPLIER: float = 2.0     # trigger when energy > N × baseline
 MIN_RETRIGGER_SEC: float = 0.5     # dead-time after a trigger
 
 # ──────────────────────────────────────────────────────────────────────
@@ -92,7 +92,22 @@ MAX_QUEUE_SIZE: int = 64           # max pending trigger windows
 INFERENCE_TIMEOUT_SEC: float = 5.0 # per-window inference budget
 
 # ──────────────────────────────────────────────────────────────────────
-# 8. LOGGING / OUTPUT
+# 8. CNN CLASSIFIER (STAGE 2 ALTERNATIVE)
+# ──────────────────────────────────────────────────────────────────────
+CNN_MODEL_PATH: Path = Path(
+    r"C:\Users\holde\Documents\MLProject\models\feature_sweep_stagea6\logmel\cnn_gunshot_classifier.keras"
+)
+CNN_FEATURE_TYPE: str = "LogMel"
+CNN_DECISION_THRESHOLD: float = 0.15
+CLASSIFIER_MODE: str = "yamnet"  # Options: "cnn", "yamnet", "ensemble"
+
+# ──────────────────────────────────────────────────────────────────────
+# 9. DATABASE LOGGING
+# ──────────────────────────────────────────────────────────────────────
+SQLITE_LOG_PATH: Path = Path(r"C:\Users\holde\Documents\MLProject\logs\detections.db")
+
+# ──────────────────────────────────────────────────────────────────────
+# 10. LOGGING / OUTPUT
 # ──────────────────────────────────────────────────────────────────────
 LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 LOG_DATE_FORMAT: str = "%Y-%m-%dT%H:%M:%S"

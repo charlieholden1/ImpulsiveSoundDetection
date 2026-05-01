@@ -18,14 +18,17 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import asdict, dataclass, field
-from typing import List
+from typing import List, Optional
+from datetime import datetime, timezone
 
 import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
 
 from . import config
+from .spectrogram_utils import waveform_to_rgb_image
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,7 @@ logger = logging.getLogger(__name__)
 # ──────────────────────────────────────────────────────────────────────
 @dataclass
 class ClassificationResult:
-    """Output of a single YAMNet inference."""
+    """Output of a classification inference."""
 
     timestamp: float
     onset_index: int
@@ -43,9 +46,21 @@ class ClassificationResult:
     confidence: float
     is_suspicious: bool
     top_k: List[dict] = field(default_factory=list)
+    event_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
+    severity: str = "LOW"
+    session_id: Optional[str] = None
+
+    def __post_init__(self):
+        """Compute severity from confidence."""
+        if self.confidence < 0.6:
+            self.severity = "LOW"
+        elif self.confidence < 0.85:
+            self.severity = "MEDIUM"
+        else:
+            self.severity = "HIGH"
 
     def to_json(self) -> str:
-        """Serialise to a compact JSON string.
+        """Serialise to a rich JSON string.
 
         Returns
         -------
@@ -53,11 +68,15 @@ class ClassificationResult:
             JSON representation of the detection event.
         """
         payload = {
-            "timestamp": self.timestamp,
+            "event_uuid": self.event_uuid,
+            "timestamp_unix": self.timestamp,
+            "timestamp_iso": datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat(),
             "onset_index": self.onset_index,
             "label": self.label,
             "confidence": round(self.confidence, 4),
             "is_suspicious": self.is_suspicious,
+            "severity": self.severity,
+            "session_id": self.session_id,
         }
         return json.dumps(payload)
 
@@ -184,19 +203,30 @@ class YAMNetClassifier:
         best = top_k_list[0]
         is_suspicious = self._is_suspicious(top_k_list)
 
+        if is_suspicious:
+            matching = next(
+                entry for entry in top_k_list
+                if any(s.lower() in entry["class"].lower() for s in self._suspicious_labels)
+            )
+            label = matching["class"]
+            confidence = matching["score"]
+        else:
+            label = best["class"]
+            confidence = best["score"]
+
         result = ClassificationResult(
             timestamp=round(timestamp, 4),
             onset_index=onset_index,
-            label=best["class"],
-            confidence=best["score"],
+            label=label,
+            confidence=confidence,
             is_suspicious=is_suspicious,
             top_k=top_k_list,
         )
         logger.info(
             "t=%.3f s  →  %s (%.2f)  suspicious=%s",
             timestamp,
-            best["class"],
-            best["score"],
+            label,
+            confidence,
             is_suspicious,
         )
         return result
@@ -218,3 +248,122 @@ class YAMNetClassifier:
                 if susp.lower() in entry["class"].lower():
                     return True
         return False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# CNN-based classifier
+# ──────────────────────────────────────────────────────────────────────
+class CNNClassifier:
+    """Trained EfficientNetB0 CNN for binary gunshot classification.
+
+    Takes a raw waveform, computes log-mel spectrogram, and runs inference
+    on the trained model.
+
+    Parameters
+    ----------
+    model_path : str
+        Path to the .keras model file.
+    decision_threshold : float
+        Sigmoid threshold for binary decision (default 0.5).
+    """
+
+    def __init__(
+        self,
+        model_path: str = None,
+        decision_threshold: float = 0.5,
+        feature_type: str = None,
+    ) -> None:
+        self._model_path = model_path or str(config.CNN_MODEL_PATH)
+        self._decision_threshold = decision_threshold
+        self._feature_type = feature_type or config.CNN_FEATURE_TYPE
+        self._model = None
+        logger.info(
+            "CNN Classifier initialized. Model path: %s, Feature: %s, Threshold: %.2f",
+            self._model_path,
+            self._feature_type,
+            decision_threshold,
+        )
+
+    def _ensure_model(self) -> None:
+        """Load model if not already cached."""
+        if self._model is not None:
+            return
+        logger.info("Loading CNN model from %s", self._model_path)
+        try:
+            self._model = tf.keras.models.load_model(self._model_path)
+            logger.info("CNN model loaded successfully.")
+        except Exception as exc:
+            raise RuntimeError(f"Failed to load CNN model: {exc}") from exc
+
+    def classify(
+        self,
+        waveform: np.ndarray,
+        timestamp: float = 0.0,
+        onset_index: int = 0,
+    ) -> ClassificationResult:
+        """Run CNN inference on a single audio window.
+
+        Parameters
+        ----------
+        waveform : np.ndarray
+            1-D float32 array at 16 kHz. Ideally 0.975 s (15,600 samples).
+        timestamp : float
+            Playback timestamp (seconds) for logging.
+        onset_index : int
+            Absolute sample index of the trigger onset.
+
+        Returns
+        -------
+        ClassificationResult
+        """
+        self._ensure_model()
+
+        # Compute log-mel spectrogram
+        try:
+            img_rgb = waveform_to_rgb_image(
+                waveform,
+                config.SAMPLE_RATE,
+                feature_type=self._feature_type,
+                image_size=(224, 224),
+                target_duration_sec=5.0,
+            )
+            img_rgb = np.expand_dims(img_rgb, axis=0)
+
+        except Exception as exc:
+            logger.error("Failed to compute spectrogram: %s", exc)
+            raise RuntimeError(f"Spectrogram computation failed: {exc}") from exc
+
+        # Run inference
+        try:
+            logit = self._model.predict(img_rgb, verbose=0)[0, 0]
+        except Exception as exc:
+            logger.error("Model inference failed: %s", exc)
+            raise RuntimeError(f"Model inference failed: {exc}") from exc
+
+        # CRITICAL FIX: Model outputs raw LOGITS, must apply sigmoid to get probability [0, 1]
+        sigmoid_output = 1.0 / (1.0 + np.exp(-logit))
+
+        # Apply threshold
+        is_suspicious = sigmoid_output >= self._decision_threshold
+        label = "GUNSHOT" if is_suspicious else "NOGUN"
+
+        result = ClassificationResult(
+            timestamp=round(timestamp, 4),
+            onset_index=onset_index,
+            label=label,
+            confidence=float(sigmoid_output),
+            is_suspicious=bool(is_suspicious),
+            top_k=[
+                {"class": label, "score": float(sigmoid_output)},
+            ],
+        )
+
+        logger.info(
+            "t=%.3f s  →  %s (%.4f)  suspicious=%s",
+            timestamp,
+            label,
+            sigmoid_output,
+            is_suspicious,
+        )
+
+        return result

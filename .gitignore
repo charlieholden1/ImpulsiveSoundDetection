@@ -47,12 +47,16 @@ Gunshot Audio Spectrogram Dataset for Binary Class/MFCC/
 # ── ML model artefacts & caches ───────────────────────────────────────
 *.h5
 *.keras
+*.tflite
 *.ckpt
 *.pb
 saved_model/
 checkpoints/
 tensorflow_hub_cache/
 tfhub_cache/
+
+# ── External / downloaded datasets ────────────────────────────────────
+external_data/
 
 # ── Jupyter ───────────────────────────────────────────────────────────
 .ipynb_checkpoints/

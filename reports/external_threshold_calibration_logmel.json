@@ -1,0 +1,87 @@
+{
+  "best_threshold": 0.15000000000000002,
+  "validation_metrics": {
+    "recall": 0.37749120750293086,
+    "specificity": 0.9393139841688655,
+    "fpr": 0.06068601583113457,
+    "precision": 0.7368421052631579,
+    "f1": 0.49922480620155035,
+    "balanced_accuracy": 0.6584025958358981,
+    "tp": 322,
+    "fp": 115,
+    "fn": 531,
+    "tn": 1780
+  },
+  "test_metrics": {
+    "recall": 0.3552465233881163,
+    "specificity": 0.935349322210636,
+    "fpr": 0.06465067778936393,
+    "precision": 0.6938271604938272,
+    "f1": 0.4698996655518395,
+    "balanced_accuracy": 0.6452979227993761,
+    "tp": 281,
+    "fp": 124,
+    "fn": 510,
+    "tn": 1794
+  },
+  "voice_validation_metrics": {
+    "recall": 0.37749120750293086,
+    "specificity": 1.0,
+    "fpr": 0.0,
+    "precision": 1.0,
+    "f1": 0.5480851063829788,
+    "balanced_accuracy": 0.6887456037514654,
+    "tp": 322,
+    "fp": 0,
+    "fn": 531,
+    "tn": 656
+  },
+  "voice_test_metrics": {
+    "recall": 0.3552465233881163,
+    "specificity": 0.9941002949852508,
+    "fpr": 0.0058997050147492625,
+    "precision": 0.9859649122807017,
+    "f1": 0.5223048327137546,
+    "balanced_accuracy": 0.6746734091866835,
+    "tp": 281,
+    "fp": 4,
+    "fn": 510,
+    "tn": 674
+  },
+  "realised_validation_metrics": {
+    "recall": 0.0,
+    "specificity": 0.9071832122679581,
+    "fpr": 0.09281678773204197,
+    "precision": 0.0,
+    "f1": 0.0,
+    "balanced_accuracy": 0.45359160613397903,
+    "tp": 0,
+    "fp": 115,
+    "fn": 0,
+    "tn": 1124
+  },
+  "realised_test_metrics": {
+    "recall": 0.0,
+    "specificity": 0.9032258064516129,
+    "fpr": 0.0967741935483871,
+    "precision": 0.0,
+    "f1": 0.0,
+    "balanced_accuracy": 0.45161290322580644,
+    "tp": 0,
+    "fp": 120,
+    "fn": 0,
+    "tn": 1120
+  },
+  "counts": {
+    "voice_validation": 1509,
+    "voice_test": 1469,
+    "realised_validation": 1239,
+    "realised_test": 1240
+  },
+  "probability_means": {
+    "voice_validation": 0.08973052334417171,
+    "voice_test": 0.09535754785867132,
+    "realised_validation": 0.06311519480548285,
+    "realised_test": 0.06097774911603107
+  }
+}
