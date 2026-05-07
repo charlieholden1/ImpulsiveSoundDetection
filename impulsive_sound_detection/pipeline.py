@@ -71,8 +71,10 @@ class DetectionPipeline:
         classifier: Optional[Union[YAMNetClassifier, CNNClassifier]] = None,
         log_path: Optional[Path] = None,
         classifier_mode: Optional[str] = None,
+        mqtt_bridge=None,           # MQTTBridge | None
     ) -> None:
         self.monitor = monitor or StreamMonitor()
+        self._mqtt_bridge = mqtt_bridge
 
         # Initialize classifier based on mode if not provided
         if classifier is not None:
@@ -164,7 +166,7 @@ class DetectionPipeline:
         while offset < total:
             end = min(offset + chunk_size, total)
             chunk = waveform[offset:end]
-            triggers = self.monitor.feed(chunk)
+            triggers = self.monitor.feed(chunk, mqtt_bridge=self._mqtt_bridge)
             for trigger in triggers:
                 result = self._classify_trigger(trigger)
                 self._results.append(result)
@@ -214,7 +216,7 @@ class DetectionPipeline:
         start = time.monotonic()
 
         for chunk in stream_iterator:
-            triggers = self.monitor.feed(chunk)
+            triggers = self.monitor.feed(chunk, mqtt_bridge=self._mqtt_bridge)
             for trigger in triggers:
                 result = self._classify_trigger(trigger)
                 self._results.append(result)
@@ -231,22 +233,11 @@ class DetectionPipeline:
 
     # ── internal helpers ──────────────────────────────────────────────
     def _classify_trigger(self, trigger: TriggerEvent) -> ClassificationResult:
-        """Run Stage 2 classification on a trigger event.
-
-        Parameters
-        ----------
-        trigger : TriggerEvent
-            Output of Stage 1.
-
-        Returns
-        -------
-        ClassificationResult
-        """
+        """Run Stage 2 classification on a trigger event."""
         t0 = time.monotonic()
 
         # Handle ensemble mode (list of classifiers)
         if isinstance(self.classifier, list):
-            # Ensemble: CNN AND YAMNet (both must agree)
             results = [
                 c.classify(
                     waveform=trigger.window,
@@ -255,19 +246,19 @@ class DetectionPipeline:
                 )
                 for c in self.classifier
             ]
-            # Combine: is_suspicious only if BOTH agree
             is_suspicious = all(r.is_suspicious for r in results)
-            # Use CNN result as primary, note ensemble decision
             result = results[0]
             result.is_suspicious = is_suspicious
             result.label = "GUNSHOT" if is_suspicious else "NOGUN"
         else:
-            # Single classifier (CNN or YAMNet)
             result = self.classifier.classify(
                 waveform=trigger.window,
                 timestamp=trigger.timestamp_sec,
                 onset_index=trigger.onset_index,
             )
+
+        # Propagate the precise onset wall-clock time from Stage 1
+        result.wall_clock_time = trigger.wall_clock_time
 
         elapsed = time.monotonic() - t0
         if elapsed > config.INFERENCE_TIMEOUT_SEC:
@@ -295,27 +286,30 @@ class DetectionPipeline:
             self._emit(result)
 
     def _emit(self, result: ClassificationResult) -> None:
-        """Emit a detection result via callback, print, and log.
+        """Emit a detection result via MQTT, callback, print, and log.
 
-        If a dashboard callback is registered (live mode) it is
-        called *instead* of the plain ``print()``, keeping the
-        terminal output clean. Event is logged to both SQLite and JSONL.
+        Order: MQTT publish → dashboard callback → local log.
 
         Parameters
         ----------
         result : ClassificationResult
             Detection to emit.
         """
-        # Live-mode dashboard callback
+        # 1. MQTT publish (node → host)
+        if self._mqtt_bridge is not None:
+            self._mqtt_bridge.publish_detection(result)
+
+        # 2. Live-mode dashboard callback
         if self._on_result_callback is not None:
             try:
                 self._on_result_callback(result)
             except Exception:
                 logger.exception("Dashboard callback failed")
-        else:
+        elif self._mqtt_bridge is None:
+            # Only print to stdout when no MQTT and no callback
             print(result.to_json())
 
-        # Log to SQLite + JSONL via EventLogger
+        # 3. Log to SQLite + JSONL via EventLogger
         try:
             self._event_logger.log(result)
         except Exception:

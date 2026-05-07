@@ -49,6 +49,8 @@ class TriggerEvent:
     window: np.ndarray          # 0.975 s clip centred on the onset
     rms_energy: float
     baseline_energy: float
+    node_id: str = field(default_factory=lambda: config.NODE_ID)
+    wall_clock_time: float = field(default_factory=time.time)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -81,11 +83,13 @@ class StreamMonitor:
         energy_multiplier: float = config.ENERGY_MULTIPLIER,
         min_retrigger_sec: float = config.MIN_RETRIGGER_SEC,
         max_queue_size: int = config.MAX_QUEUE_SIZE,
+        node_id: str = config.NODE_ID,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.energy_multiplier = energy_multiplier
         self.min_retrigger_sec = min_retrigger_sec
+        self._node_id = node_id
 
         # Number of RMS values to keep in the rolling window
         frames_per_sec = sample_rate / frame_size
@@ -201,16 +205,16 @@ class StreamMonitor:
         return window
 
     # ── public interface ──────────────────────────────────────────────
-    def feed(self, chunk: np.ndarray) -> List[TriggerEvent]:
+    def feed(self, chunk: np.ndarray, mqtt_bridge=None) -> List[TriggerEvent]:
         """Ingest a chunk of audio and return any new triggers.
-
-        This is the main entry point.  Call it repeatedly with
-        successive chunks from a microphone or file reader.
 
         Parameters
         ----------
         chunk : np.ndarray
             1-D float32 audio samples at ``self.sample_rate``.
+        mqtt_bridge : MQTTBridge | None
+            If provided, publish throttled RMS frames over MQTT after
+            each frame computation.
 
         Returns
         -------
@@ -232,10 +236,12 @@ class StreamMonitor:
                 self._rms_history = self._rms_history[-self._rolling_len:]
 
             current_time = self._global_sample_idx / self.sample_rate
+            is_trigger = False
 
             if rms > self.energy_multiplier * baseline:
                 gap = current_time - self._last_trigger_time
                 if gap >= self.min_retrigger_sec:
+                    is_trigger = True
                     window = self._extract_window(self._global_sample_idx)
                     event = TriggerEvent(
                         onset_index=self._global_sample_idx,
@@ -243,6 +249,8 @@ class StreamMonitor:
                         window=window,
                         rms_energy=round(rms, 6),
                         baseline_energy=round(baseline, 6),
+                        node_id=self._node_id,
+                        wall_clock_time=time.time(),
                     )
                     triggers.append(event)
                     self._last_trigger_time = current_time
@@ -269,6 +277,16 @@ class StreamMonitor:
                         rms,
                         baseline,
                     )
+
+            # Publish throttled RMS frame over MQTT if bridge provided
+            if mqtt_bridge is not None:
+                threshold = self.energy_multiplier * baseline
+                mqtt_bridge.publish_rms(
+                    rms=rms,
+                    baseline=baseline,
+                    threshold=threshold,
+                    is_trigger=is_trigger,
+                )
 
             self._global_sample_idx += self.frame_size
             offset += self.frame_size

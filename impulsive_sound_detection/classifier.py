@@ -23,6 +23,8 @@ from dataclasses import asdict, dataclass, field
 from typing import List, Optional
 from datetime import datetime, timezone
 
+import time
+
 import numpy as np
 import tensorflow as tf
 import tensorflow_hub as hub
@@ -49,6 +51,10 @@ class ClassificationResult:
     event_uuid: str = field(default_factory=lambda: str(uuid.uuid4()))
     severity: str = "LOW"
     session_id: Optional[str] = None
+    # ── MQTT / multi-node fields ──────────────────────────────────────
+    node_id: str = field(default_factory=lambda: config.NODE_ID)
+    wall_clock_time: float = field(default_factory=time.time)
+    received_at_host: float = 0.0   # set by host_subscriber on arrival
 
     def __post_init__(self):
         """Compute severity from confidence."""
@@ -60,7 +66,10 @@ class ClassificationResult:
             self.severity = "HIGH"
 
     def to_json(self) -> str:
-        """Serialise to a rich JSON string.
+        """Serialise to a compact wire-format JSON string for MQTT.
+
+        Omits top_k to keep the payload small.  Full payload (incl.
+        top_k) is written to the local JSONL log via to_json_full().
 
         Returns
         -------
@@ -68,17 +77,28 @@ class ClassificationResult:
             JSON representation of the detection event.
         """
         payload = {
-            "event_uuid": self.event_uuid,
-            "timestamp_unix": self.timestamp,
-            "timestamp_iso": datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat(),
-            "onset_index": self.onset_index,
-            "label": self.label,
-            "confidence": round(self.confidence, 4),
-            "is_suspicious": self.is_suspicious,
-            "severity": self.severity,
-            "session_id": self.session_id,
+            "event_uuid":       self.event_uuid,
+            "node_id":          self.node_id,
+            "timestamp_unix":   self.timestamp,
+            "wall_clock_time":  round(self.wall_clock_time, 6),
+            "timestamp_iso":    datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat(),
+            "onset_index":      self.onset_index,
+            "label":            self.label,
+            "confidence":       round(self.confidence, 4),
+            "is_suspicious":    self.is_suspicious,
+            "severity":         self.severity,
+            "session_id":       self.session_id,
         }
         return json.dumps(payload)
+
+    def to_json_full(self) -> str:
+        """Serialise including top_k – used for local JSONL logs.
+
+        Returns
+        -------
+        str
+        """
+        return json.dumps(self.to_dict())
 
     def to_dict(self) -> dict:
         """Return a plain dictionary for logging or aggregation.
@@ -88,6 +108,39 @@ class ClassificationResult:
         dict
         """
         return asdict(self)
+
+    @classmethod
+    def from_mqtt_payload(cls, payload: str, received_at: float) -> "ClassificationResult":
+        """Deserialise a JSON string received from MQTT on the host.
+
+        Parameters
+        ----------
+        payload : str
+            JSON string as published by the node via to_json().
+        received_at : float
+            time.time() captured by the host subscriber on arrival.
+            Used by the Sound Localization team for TDOA calculations.
+
+        Returns
+        -------
+        ClassificationResult
+        """
+        data = json.loads(payload)
+        obj = cls(
+            timestamp=data["timestamp_unix"],
+            onset_index=data.get("onset_index", 0),
+            label=data["label"],
+            confidence=data["confidence"],
+            is_suspicious=data["is_suspicious"],
+            top_k=[],
+            event_uuid=data.get("event_uuid", str(uuid.uuid4())),
+            severity=data.get("severity", "LOW"),
+            session_id=data.get("session_id"),
+            node_id=data.get("node_id", "unknown"),
+            wall_clock_time=data.get("wall_clock_time", 0.0),
+            received_at_host=received_at,
+        )
+        return obj
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -111,10 +164,12 @@ class YAMNetClassifier:
         model_handle: str = config.YAMNET_MODEL_HANDLE,
         top_k: int = config.TOP_K,
         suspicious_labels: frozenset = config.SUSPICIOUS_LABELS,
+        node_id: str = config.NODE_ID,
     ) -> None:
         self._model_handle = model_handle
         self._top_k = top_k
         self._suspicious_labels = suspicious_labels
+        self._node_id = node_id
         self._model = None
         self._class_names: List[str] = []
 
@@ -221,6 +276,8 @@ class YAMNetClassifier:
             confidence=confidence,
             is_suspicious=is_suspicious,
             top_k=top_k_list,
+            node_id=self._node_id,
+            wall_clock_time=time.time(),
         )
         logger.info(
             "t=%.3f s  →  %s (%.2f)  suspicious=%s",
@@ -272,10 +329,12 @@ class CNNClassifier:
         model_path: str = None,
         decision_threshold: float = 0.5,
         feature_type: str = None,
+        node_id: str = config.NODE_ID,
     ) -> None:
         self._model_path = model_path or str(config.CNN_MODEL_PATH)
         self._decision_threshold = decision_threshold
         self._feature_type = feature_type or config.CNN_FEATURE_TYPE
+        self._node_id = node_id
         self._model = None
         logger.info(
             "CNN Classifier initialized. Model path: %s, Feature: %s, Threshold: %.2f",
@@ -356,6 +415,8 @@ class CNNClassifier:
             top_k=[
                 {"class": label, "score": float(sigmoid_output)},
             ],
+            node_id=self._node_id,
+            wall_clock_time=time.time(),
         )
 
         logger.info(
