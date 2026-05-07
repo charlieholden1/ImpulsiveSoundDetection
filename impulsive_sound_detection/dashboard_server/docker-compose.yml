@@ -1,0 +1,11 @@
+services:
+  isd-dashboard:
+    build: .
+    container_name: isd-dashboard
+    ports:
+      - "3000:3000"
+    volumes:
+      - C:\Github\ImpulsiveSoundDetection\logs:/data
+    environment:
+      - ISD_DB_PATH=/data/host.db
+    restart: unless-stopped

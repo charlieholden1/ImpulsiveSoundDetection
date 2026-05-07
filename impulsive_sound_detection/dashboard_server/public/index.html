@@ -1,0 +1,1297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISD Host Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg:      #080e1a; --bg2: #0d1627; --bg3: #111d35;
+    --border:  #1e3050; --border2: #253d63;
+    --cyan:    #00d4ff; --cyan2: #0099bb;
+    --red:     #ff3d5a; --amber: #ffb020; --green: #00e676;
+    --purple:  #c084fc; --text: #e2eaf5; --muted: #6a85a8;
+    --mono: 'Space Mono', monospace; --sans: 'DM Sans', sans-serif;
+  }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--sans); overflow-x: hidden; }
+  body::before { content:''; position:fixed; inset:0; pointer-events:none; z-index:1000;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px); }
+
+  .shell { display:grid; grid-template-rows:56px 1fr; grid-template-columns:220px 1fr;
+           grid-template-areas:"nav nav" "side main"; min-height:100vh; }
+
+  nav { grid-area:nav; background:var(--bg2); border-bottom:1px solid var(--border);
+        display:flex; align-items:center; gap:20px; padding:0 24px; }
+  .nav-logo { font-family:var(--mono); font-size:13px; font-weight:700; color:var(--cyan);
+               letter-spacing:.08em; display:flex; align-items:center; gap:8px; }
+  .pulse { width:8px; height:8px; border-radius:50%; background:var(--cyan);
+           animation:pulse 2s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(0,212,255,.5)}
+                     70%{box-shadow:0 0 0 8px rgba(0,212,255,0)}
+                     100%{box-shadow:0 0 0 0 rgba(0,212,255,0)} }
+  .nav-badge { font-family:var(--mono); font-size:10px; padding:2px 8px; border-radius:2px;
+               background:rgba(0,212,255,.1); color:var(--cyan); border:1px solid rgba(0,212,255,.3); }
+  .nav-badge.demo { background:rgba(255,176,32,.1); color:var(--amber); border-color:rgba(255,176,32,.3); }
+  .nav-badge.maint { background:rgba(192,132,252,.1); color:var(--purple); border-color:rgba(192,132,252,.3); }
+  .nav-right { margin-left:auto; display:flex; align-items:center; gap:16px; }
+  .nav-time { font-family:var(--mono); font-size:11px; color:var(--muted); }
+  .node-filter { background:var(--bg3); border:1px solid var(--border2); color:var(--text);
+                 font-family:var(--sans); font-size:12px; padding:5px 10px; border-radius:4px;
+                 cursor:pointer; outline:none; }
+
+  aside { grid-area:side; background:var(--bg2); border-right:1px solid var(--border);
+          padding:20px 0; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .side-label { font-family:var(--mono); font-size:9px; color:var(--muted);
+                letter-spacing:.12em; padding:0 20px 8px; margin-top:8px; }
+  .side-item { display:flex; align-items:center; gap:10px; padding:9px 20px; font-size:13px;
+               color:var(--muted); cursor:pointer; border-left:2px solid transparent; text-decoration:none; user-select:none; }
+  .side-item:hover { color:var(--text); background:rgba(255,255,255,.02); }
+  .side-item.active { color:var(--cyan); border-left-color:var(--cyan); background:rgba(0,212,255,.05); }
+  .side-item.maint-item.active { color:var(--purple); border-left-color:var(--purple); background:rgba(192,132,252,.05); }
+  .side-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+  .node-entry { padding:7px 20px; font-size:11px; font-family:var(--mono); border-left:2px solid transparent; }
+  .node-entry .node-name { font-size:10px; margin-bottom:3px; }
+  .node-entry .node-stats { display:flex; gap:8px; }
+  .node-entry .ns.alert { color:var(--red); }
+  .node-entry.online  { border-left-color:var(--green); }
+  .node-entry.online .node-name { color:var(--muted); }
+  .node-entry.offline { border-left-color:var(--border); }
+  .node-entry.offline .node-name { color:#3a4d66; }
+  .node-entry.offline .ns { color:#3a4d66; }
+  .node-entry.disabled { opacity:.4; }
+
+  main { grid-area:main; overflow-y:auto; }
+  .tab-view { display:none; padding:20px 24px; flex-direction:column; gap:16px; }
+  .tab-view.active { display:flex; }
+
+  /* ── Stats ── */
+  .stats-row { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
+  .stat-card { background:var(--bg2); border:1px solid var(--border); padding:16px 18px;
+               border-radius:6px; position:relative; overflow:hidden; }
+  .stat-card::before { content:''; position:absolute; top:0; left:0; right:0; height:2px;
+                       background:var(--accent,var(--cyan)); }
+  .stat-card .stat-val { font-family:var(--mono); font-size:28px; font-weight:700;
+                          color:var(--accent,var(--cyan)); line-height:1; margin-bottom:6px; }
+  .stat-card .stat-lbl { font-size:11px; color:var(--muted); }
+
+  /* ── Panels ── */
+  .panels { display:grid; grid-template-columns:1fr 340px; gap:16px; }
+  .panel { background:var(--bg2); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .panel-head { display:flex; align-items:center; justify-content:space-between;
+                padding:12px 16px; border-bottom:1px solid var(--border);
+                font-family:var(--mono); font-size:11px; color:var(--muted); letter-spacing:.08em; }
+  .ph-badge { font-size:9px; padding:2px 7px; background:rgba(0,212,255,.1); color:var(--cyan);
+              border:1px solid rgba(0,212,255,.2); border-radius:2px; }
+  .ph-badge.red { background:rgba(255,61,90,.1); color:var(--red); border-color:rgba(255,61,90,.3); }
+  .ph-badge.purple { background:rgba(192,132,252,.1); color:var(--purple); border-color:rgba(192,132,252,.3); }
+  .ph-badge.amber { background:rgba(255,176,32,.1); color:var(--amber); border-color:rgba(255,176,32,.3); }
+  .panel-body { padding:16px; }
+
+  .chart-wrap { height:130px; position:relative; }
+  .thresh-row { display:flex; align-items:center; gap:12px; padding:10px 16px;
+                border-top:1px solid var(--border); font-size:11px; color:var(--muted); font-family:var(--mono); }
+  .thresh-row input[type=range] { flex:1; accent-color:var(--cyan); }
+  .thresh-val { color:var(--cyan); min-width:30px; }
+
+  .event-feed { display:flex; flex-direction:column; }
+  .event-row { display:grid; grid-template-columns:8px 60px 1fr auto auto;
+               align-items:center; gap:10px; padding:8px 16px; font-size:12px;
+               border-bottom:1px solid var(--border); }
+  .event-row:last-child { border-bottom:none; }
+  .event-row.suspicious { background:rgba(255,61,90,.05); }
+  .event-row.new-event { animation:flashin .6s ease; }
+  @keyframes flashin { 0%{background:rgba(0,212,255,.12)} 100%{background:transparent} }
+  .ev-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .ev-dot.alert { background:var(--red); box-shadow:0 0 6px var(--red); }
+  .ev-dot.ok    { background:var(--border2); }
+  .ev-node { font-family:var(--mono); font-size:10px; color:var(--cyan); }
+  .ev-label .sub { font-size:10px; color:var(--muted); font-family:var(--mono); margin-top:1px; }
+  .ev-time { font-family:var(--mono); font-size:10px; color:var(--muted); white-space:nowrap; }
+  .ev-conf { font-family:var(--mono); font-size:12px; font-weight:700; min-width:38px; text-align:right; }
+  .ev-conf.high { color:var(--red); } .ev-conf.mid { color:var(--amber); } .ev-conf.low { color:var(--muted); }
+
+  .gauge-wrap { display:flex; flex-direction:column; align-items:center; gap:12px; padding:20px 16px; }
+  .gauge-ring { position:relative; width:120px; height:120px; }
+  .gauge-ring canvas { width:100% !important; height:100% !important; }
+  .gauge-center { position:absolute; inset:0; display:flex; flex-direction:column;
+                  align-items:center; justify-content:center; }
+  .gauge-score { font-family:var(--mono); font-size:22px; font-weight:700; }
+  .gauge-score.alert { color:var(--red); } .gauge-score.ok { color:var(--cyan); }
+  .gauge-label { font-size:10px; color:var(--muted); margin-top:2px; }
+  .led-row { display:flex; justify-content:space-between; align-items:center;
+             padding:7px 0; border-bottom:1px solid var(--border); font-size:12px; }
+  .led-row:last-child { border-bottom:none; }
+  .led-key { color:var(--muted); font-family:var(--mono); font-size:10px; }
+  .led-val { color:var(--text); font-family:var(--mono); font-size:11px; }
+  .led-val.alert { color:var(--red); font-weight:700; }
+  .led-val.ok    { color:var(--muted); }
+
+  .bottom-row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:16px; }
+  table { width:100%; border-collapse:collapse; font-size:11px; font-family:var(--mono); }
+  th { text-align:left; padding:8px 12px; color:var(--muted); font-size:9px;
+       letter-spacing:.1em; border-bottom:1px solid var(--border); font-weight:400; }
+  td { padding:7px 12px; border-bottom:1px solid var(--border); color:var(--text); vertical-align:middle; }
+  tr:last-child td { border-bottom:none; }
+  tr:hover td { background:rgba(255,255,255,.02); }
+  .badge { display:inline-block; font-size:9px; padding:2px 7px; border-radius:2px; font-family:var(--mono); }
+  .badge.susp   { background:rgba(255,61,90,.15); color:var(--red); border:1px solid rgba(255,61,90,.3); }
+  .badge.bg     { background:rgba(106,133,168,.1); color:var(--muted); border:1px solid var(--border); }
+  .badge.online { background:rgba(0,230,118,.1); color:var(--green); border:1px solid rgba(0,230,118,.3); }
+  .badge.offline{ background:rgba(106,133,168,.1); color:var(--muted); border:1px solid var(--border); }
+  .badge.disabled{ background:rgba(255,61,90,.08); color:#ff3d5a88; border:1px solid rgba(255,61,90,.2); }
+
+  .loc-stub { padding:20px 16px; display:flex; flex-direction:column; gap:10px; }
+  .loc-stub-icon { font-size:28px; text-align:center; }
+  .loc-stub-title { font-family:var(--mono); font-size:11px; color:var(--purple); text-align:center; }
+  .loc-stub-body { font-size:11px; color:var(--muted); text-align:center; line-height:1.6; }
+  .loc-result { display:flex; flex-direction:column; gap:8px; }
+
+  /* ── History tab ── */
+  .filter-bar { display:flex; flex-wrap:wrap; gap:8px; align-items:flex-end;
+                background:var(--bg2); border:1px solid var(--border); border-radius:6px; padding:12px 16px; }
+  .filter-group { display:flex; flex-direction:column; gap:4px; }
+  .filter-group label { font-family:var(--mono); font-size:9px; color:var(--muted); letter-spacing:.1em; }
+  .filter-group input, .filter-group select {
+    background:var(--bg3); border:1px solid var(--border2); color:var(--text);
+    font-family:var(--mono); font-size:11px; padding:5px 8px; border-radius:3px; outline:none;
+    min-width:120px;
+  }
+  .filter-group input:focus, .filter-group select:focus { border-color:var(--cyan2); }
+  .btn { font-family:var(--mono); font-size:10px; padding:6px 14px; border-radius:3px;
+         cursor:pointer; border:1px solid; letter-spacing:.06em; transition:all .15s; }
+  .btn-cyan { background:rgba(0,212,255,.1); color:var(--cyan); border-color:rgba(0,212,255,.3); }
+  .btn-cyan:hover { background:rgba(0,212,255,.2); }
+  .btn-red { background:rgba(255,61,90,.1); color:var(--red); border-color:rgba(255,61,90,.3); }
+  .btn-red:hover { background:rgba(255,61,90,.2); }
+  .btn-amber { background:rgba(255,176,32,.1); color:var(--amber); border-color:rgba(255,176,32,.3); }
+  .btn-amber:hover { background:rgba(255,176,32,.2); }
+  .btn-muted { background:rgba(106,133,168,.1); color:var(--muted); border-color:var(--border); }
+  .btn-muted:hover { background:rgba(106,133,168,.2); }
+  .btn-purple { background:rgba(192,132,252,.1); color:var(--purple); border-color:rgba(192,132,252,.3); }
+  .btn-purple:hover { background:rgba(192,132,252,.2); }
+  .btn[disabled] { opacity:.4; cursor:not-allowed; }
+  .pager { display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; color:var(--muted); }
+  .hist-table-wrap { overflow-x:auto; }
+  .sev-high { color:var(--red); } .sev-med { color:var(--amber); } .sev-low { color:var(--muted); }
+
+  /* ── Query Lab ── */
+  .query-wrap { display:flex; flex-direction:column; gap:12px; }
+  .presets { display:flex; flex-wrap:wrap; gap:6px; }
+  .preset-btn { font-family:var(--mono); font-size:9px; padding:4px 10px; cursor:pointer;
+                background:var(--bg3); border:1px solid var(--border2); color:var(--muted);
+                border-radius:3px; transition:.15s; }
+  .preset-btn:hover { color:var(--cyan); border-color:var(--cyan2); }
+  .sql-editor { background:var(--bg3); border:1px solid var(--border2); border-radius:4px;
+                color:var(--cyan); font-family:var(--mono); font-size:12px; padding:12px;
+                width:100%; min-height:80px; resize:vertical; outline:none; line-height:1.6; }
+  .sql-editor:focus { border-color:var(--cyan2); }
+  .query-meta { font-family:var(--mono); font-size:10px; color:var(--muted); }
+  .query-meta span { color:var(--cyan); }
+  .query-result-wrap { overflow-x:auto; max-height:400px; overflow-y:auto; border:1px solid var(--border); border-radius:4px; }
+  .query-error { font-family:var(--mono); font-size:11px; color:var(--red); padding:12px;
+                 background:rgba(255,61,90,.05); border:1px solid rgba(255,61,90,.2); border-radius:4px; }
+
+  /* ── Maintenance Mode ── */
+  .maint-header { display:flex; align-items:center; gap:12px; padding:14px 16px;
+                  background:rgba(192,132,252,.06); border:1px solid rgba(192,132,252,.2);
+                  border-radius:6px; }
+  .maint-header-icon { font-size:20px; }
+  .maint-header-text h3 { font-family:var(--mono); font-size:12px; color:var(--purple); margin-bottom:2px; }
+  .maint-header-text p { font-size:11px; color:var(--muted); }
+  .maint-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  .maint-section { background:var(--bg2); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .maint-section-head { padding:10px 14px; border-bottom:1px solid var(--border);
+                         font-family:var(--mono); font-size:10px; color:var(--muted);
+                         letter-spacing:.1em; display:flex; align-items:center; justify-content:space-between; }
+  .maint-section-body { padding:14px; display:flex; flex-direction:column; gap:8px; }
+  .node-admin-row { display:grid; grid-template-columns:1fr auto; align-items:center;
+                    gap:8px; padding:8px 10px; border:1px solid var(--border);
+                    border-radius:4px; background:var(--bg3); }
+  .node-admin-row.disabled-node { opacity:.5; }
+  .node-admin-info .nai-id { font-family:var(--mono); font-size:11px; color:var(--cyan); }
+  .node-admin-info .nai-loc { font-size:10px; color:var(--muted); margin-top:2px; }
+  .node-admin-info .nai-notes { font-size:10px; color:var(--purple); font-style:italic; margin-top:2px; }
+  .node-admin-actions { display:flex; gap:4px; }
+  .icon-btn { background:none; border:1px solid var(--border); color:var(--muted); padding:4px 8px;
+              border-radius:3px; cursor:pointer; font-size:11px; transition:.15s; }
+  .icon-btn:hover { border-color:var(--border2); color:var(--text); }
+  .icon-btn.danger:hover { border-color:var(--red); color:var(--red); }
+  .icon-btn.ok:hover { border-color:var(--green); color:var(--green); }
+  .icon-btn.edit:hover { border-color:var(--cyan); color:var(--cyan); }
+  .disco-row { display:flex; align-items:center; justify-content:space-between;
+               padding:8px 10px; border:1px solid rgba(255,176,32,.2);
+               border-radius:4px; background:rgba(255,176,32,.04); }
+  .disco-id { font-family:var(--mono); font-size:11px; color:var(--amber); }
+  .disco-meta { font-size:10px; color:var(--muted); margin-top:2px; }
+  .add-node-form { display:flex; flex-direction:column; gap:8px; }
+  .form-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .form-input { background:var(--bg3); border:1px solid var(--border2); color:var(--text);
+                font-family:var(--mono); font-size:11px; padding:7px 10px; border-radius:3px;
+                outline:none; width:100%; }
+  .form-input:focus { border-color:var(--cyan2); }
+  .form-input::placeholder { color:var(--border2); }
+  .toast { position:fixed; bottom:24px; right:24px; font-family:var(--mono); font-size:11px;
+           padding:10px 16px; border-radius:4px; z-index:9999; pointer-events:none;
+           animation:toastIn .2s ease; }
+  .toast.ok { background:rgba(0,230,118,.15); color:var(--green); border:1px solid rgba(0,230,118,.3); }
+  .toast.err { background:rgba(255,61,90,.15); color:var(--red); border:1px solid rgba(255,61,90,.3); }
+  @keyframes toastIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+
+  /* ── Edit modal ── */
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); z-index:500;
+                   display:none; align-items:center; justify-content:center; }
+  .modal-overlay.open { display:flex; }
+  .modal { background:var(--bg2); border:1px solid var(--border2); border-radius:8px;
+           padding:24px; width:400px; display:flex; flex-direction:column; gap:14px; }
+  .modal h4 { font-family:var(--mono); font-size:12px; color:var(--cyan); }
+  .modal-row { display:flex; flex-direction:column; gap:5px; }
+  .modal-row label { font-family:var(--mono); font-size:9px; color:var(--muted); letter-spacing:.1em; }
+  .modal-row input, .modal-row textarea {
+    background:var(--bg3); border:1px solid var(--border2); color:var(--text);
+    font-family:var(--mono); font-size:11px; padding:8px 10px; border-radius:3px;
+    outline:none; width:100%;
+  }
+  .modal-row input:focus, .modal-row textarea:focus { border-color:var(--cyan2); }
+  .modal-footer { display:flex; gap:8px; justify-content:flex-end; margin-top:4px; }
+  .toggle-pill { display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:10px; color:var(--muted); }
+  .toggle-pill input[type=checkbox] { accent-color:var(--cyan); width:14px; height:14px; cursor:pointer; }
+
+  ::-webkit-scrollbar { width:4px; }
+  ::-webkit-scrollbar-track { background:var(--bg); }
+  ::-webkit-scrollbar-thumb { background:var(--border2); border-radius:2px; }
+  .footer { font-family:var(--mono); font-size:10px; color:var(--muted);
+            text-align:center; padding:12px; border-top:1px solid var(--border); letter-spacing:.06em; }
+  .empty-state { padding:24px; text-align:center; font-family:var(--mono); font-size:11px; color:var(--border2); }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- NAV -->
+  <nav>
+    <div class="nav-logo"><span class="pulse"></span>ISD // HOST DASHBOARD</div>
+    <span class="nav-badge" id="dbModeBadge">DEMO MODE</span>
+    <div class="nav-right">
+      <span class="nav-time" id="clock">--:--:--</span>
+      <select class="node-filter" id="nodeFilter"><option value="">All nodes</option></select>
+    </div>
+  </nav>
+
+  <!-- SIDEBAR -->
+  <aside>
+    <div class="side-label">SYSTEM</div>
+    <div class="side-item active" data-tab="live">
+      <span class="side-dot" style="background:var(--cyan)"></span>Live Feed
+    </div>
+    <div class="side-item" data-tab="history">
+      <span class="side-dot" style="background:var(--border2)"></span>History
+    </div>
+    <div class="side-item" data-tab="query">
+      <span class="side-dot" style="background:var(--border2)"></span>Query Lab
+    </div>
+    <div class="side-item maint-item" data-tab="maint">
+      <span class="side-dot" style="background:var(--purple)"></span>Maintenance
+    </div>
+    <div class="side-label" style="margin-top:12px;">RPi5 NODES</div>
+    <div id="nodeList"></div>
+  </aside>
+
+  <!-- MAIN -->
+  <main>
+
+    <!-- ══ TAB: LIVE FEED ══ -->
+    <div class="tab-view active" id="tab-live">
+      <div class="stats-row">
+        <div class="stat-card" style="--accent:var(--cyan)">
+          <div class="stat-val" id="statTotal">—</div><div class="stat-lbl">EVENTS TOTAL</div>
+        </div>
+        <div class="stat-card" style="--accent:var(--red)">
+          <div class="stat-val" id="statSusp">—</div><div class="stat-lbl">SUSPICIOUS</div>
+        </div>
+        <div class="stat-card" style="--accent:var(--green)">
+          <div class="stat-val" id="statNodes">—</div><div class="stat-lbl">NODES ONLINE</div>
+        </div>
+        <div class="stat-card" style="--accent:var(--amber)">
+          <div class="stat-val" id="statConf">—</div><div class="stat-lbl">AVG CONFIDENCE</div>
+        </div>
+      </div>
+
+      <div class="panels">
+        <div class="panel">
+          <div class="panel-head">
+            <span>RMS ENERGY — ROLLING WINDOW</span>
+            <span class="ph-badge" id="rmsStatus">STREAMING</span>
+          </div>
+          <div class="panel-body"><div class="chart-wrap"><canvas id="rmsChart"></canvas></div></div>
+          <div class="thresh-row">
+            <span>THRESHOLD ×</span>
+            <input type="range" id="threshSlider" min="1" max="6" step="0.5" value="3">
+            <span class="thresh-val" id="threshVal">3.0</span>
+            <span style="color:var(--muted)">— lower = more sensitive</span>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><span>LAST DETECTION</span></div>
+          <div class="gauge-wrap">
+            <div class="gauge-ring">
+              <canvas id="gaugeCanvas"></canvas>
+              <div class="gauge-center">
+                <div class="gauge-score" id="gaugeScore">—</div>
+                <div class="gauge-label" id="gaugeLabel">no data</div>
+              </div>
+            </div>
+            <div style="width:100%" id="lastDetail"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <span>MULTI-NODE DETECTION EVENT LOG</span>
+          <span class="ph-badge" id="feedCount">0 events</span>
+        </div>
+        <div class="event-feed" id="eventFeed"></div>
+      </div>
+
+      <div class="bottom-row">
+        <div class="panel">
+          <div class="panel-head"><span>NODE SUMMARY</span></div>
+          <table><thead><tr>
+            <th>NODE</th><th>LOCATION</th><th>TOTAL</th><th>SUSP</th><th>STATUS</th>
+          </tr></thead><tbody id="nodeTable"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <span>CORRELATED EVENTS</span><span class="ph-badge">Δt ≤ 2s</span>
+          </div>
+          <table><thead><tr>
+            <th>NODE A</th><th>NODE B</th><th>LABEL</th><th>Δt</th>
+          </tr></thead><tbody id="corrTable"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <span>SOUND LOCALIZATION</span>
+            <span class="ph-badge purple" id="locBadge">PENDING INTEGRATION</span>
+          </div>
+          <div id="locPanel" class="loc-stub">
+            <div class="loc-stub-icon">📍</div>
+            <div class="loc-stub-title">TDOA LOCALIZATION MODULE</div>
+            <div class="loc-stub-body">
+              Awaiting integration with the Sound Localization team.<br>
+              Subscribe topic: <code style="color:var(--cyan)">isd/localization/result</code>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="footer">ISD HOST DASHBOARD // RPi5 MEMS NODE NETWORK // STAGE 1: RMS TRIGGER → STAGE 2: YAMNET // MATT &amp; SKOTT</div>
+    </div><!-- end live -->
+
+    <!-- ══ TAB: HISTORY ══ -->
+    <div class="tab-view" id="tab-history">
+      <div class="panel">
+        <div class="panel-head"><span>EVENT HISTORY</span><span class="ph-badge" id="histTotal">—</span></div>
+        <div class="panel-body">
+          <div class="filter-bar">
+            <div class="filter-group">
+              <label>NODE</label>
+              <select class="form-input" id="histNode" style="min-width:110px">
+                <option value="">All nodes</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <label>LABEL CONTAINS</label>
+              <input class="form-input" id="histLabel" placeholder="e.g. Gunshot" style="min-width:130px">
+            </div>
+            <div class="filter-group">
+              <label>SEVERITY</label>
+              <select class="form-input" id="histSeverity" style="min-width:90px">
+                <option value="">All</option>
+                <option value="HIGH">HIGH</option>
+                <option value="MEDIUM">MEDIUM</option>
+                <option value="LOW">LOW</option>
+              </select>
+            </div>
+            <div class="filter-group">
+              <label>FROM DATE</label>
+              <input class="form-input" id="histFrom" type="datetime-local" style="min-width:170px">
+            </div>
+            <div class="filter-group">
+              <label>TO DATE</label>
+              <input class="form-input" id="histTo" type="datetime-local" style="min-width:170px">
+            </div>
+            <div class="filter-group">
+              <label>SUSPICIOUS ONLY</label>
+              <div style="display:flex;align-items:center;gap:6px;padding:7px 0">
+                <input type="checkbox" id="histSuspOnly" style="accent-color:var(--red);width:14px;height:14px;cursor:pointer">
+                <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">YES</span>
+              </div>
+            </div>
+            <div class="filter-group" style="justify-content:flex-end">
+              <label>&nbsp;</label>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-cyan" onclick="histFetch(1)">SEARCH</button>
+                <button class="btn btn-muted" onclick="histClear()">CLEAR</button>
+                <button class="btn btn-amber" onclick="histExportCSV()">CSV ↓</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hist-table-wrap">
+          <table>
+            <thead><tr>
+              <th>ID</th><th>NODE</th><th>LABEL</th><th>CONF</th>
+              <th>SEVERITY</th><th>SUSPICIOUS</th><th>TIMESTAMP</th><th>SESSION</th>
+            </tr></thead>
+            <tbody id="histTable"></tbody>
+          </table>
+        </div>
+
+        <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--border)">
+          <div class="pager">
+            <button class="btn btn-muted" id="histPrev" onclick="histPage(-1)">← PREV</button>
+            <span id="histPageInfo">page 1 / 1</span>
+            <button class="btn btn-muted" id="histNext" onclick="histPage(1)">NEXT →</button>
+          </div>
+          <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">50 per page</span>
+        </div>
+      </div>
+    </div><!-- end history -->
+
+    <!-- ══ TAB: QUERY LAB ══ -->
+    <div class="tab-view" id="tab-query">
+      <div class="panel">
+        <div class="panel-head"><span>QUERY LAB</span><span class="ph-badge">READ-ONLY</span></div>
+        <div class="panel-body query-wrap">
+          <div>
+            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:6px;letter-spacing:.1em">PRESET QUERIES</div>
+            <div class="presets" id="presets"></div>
+          </div>
+          <textarea class="sql-editor" id="sqlInput" spellcheck="false"
+            placeholder="SELECT * FROM detection_events WHERE is_suspicious = 1 ORDER BY id DESC LIMIT 20"></textarea>
+          <div style="display:flex;align-items:center;gap:10px">
+            <button class="btn btn-cyan" onclick="runQuery()">▶ RUN QUERY</button>
+            <button class="btn btn-muted" onclick="document.getElementById('sqlInput').value=''">CLEAR</button>
+            <span class="query-meta" id="queryMeta"></span>
+          </div>
+          <div id="queryError" style="display:none"></div>
+          <div class="query-result-wrap" id="queryResultWrap" style="display:none">
+            <table id="queryTable">
+              <thead id="queryHead"></thead>
+              <tbody id="queryBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><span>SCHEMA REFERENCE</span></div>
+        <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div>
+            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;letter-spacing:.1em">detection_events</div>
+            <div style="font-family:var(--mono);font-size:10px;color:var(--border2);line-height:1.9">
+              id · event_uuid · node_id · label · confidence<br>
+              is_suspicious · severity · timestamp_node<br>
+              wall_clock_time · received_at_host<br>
+              onset_index · session_id · inserted_at
+            </div>
+          </div>
+          <div>
+            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;letter-spacing:.1em">node_status · rms_frames</div>
+            <div style="font-family:var(--mono);font-size:10px;color:var(--border2);line-height:1.9">
+              node_status: node_id · location · status<br>
+              last_seen · enabled · notes<br><br>
+              rms_frames: node_id · ts · rms<br>
+              baseline · threshold · is_trigger
+            </div>
+          </div>
+        </div>
+      </div>
+    </div><!-- end query -->
+
+    <!-- ══ TAB: MAINTENANCE ══ -->
+    <div class="tab-view" id="tab-maint">
+      <div class="maint-header">
+        <div class="maint-header-icon">🔧</div>
+        <div class="maint-header-text">
+          <h3>MAINTENANCE MODE</h3>
+          <p>Node discovery, registration, configuration, and diagnostics. Changes take effect immediately in the database.</p>
+        </div>
+        <div style="margin-left:auto">
+          <button class="btn btn-purple" onclick="maintRefresh()">↺ REFRESH</button>
+        </div>
+      </div>
+
+      <!-- Discovered nodes (auto-detected from MQTT traffic) -->
+      <div class="panel">
+        <div class="panel-head">
+          <span>NODE DISCOVERY</span>
+          <span class="ph-badge amber" id="discoveredBadge">0 NEW</span>
+        </div>
+        <div class="panel-body">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+            These nodes have sent data but are not yet registered. They were auto-detected from detection events.
+            Click <strong style="color:var(--amber)">REGISTER</strong> to add them to the system.
+          </div>
+          <div id="discoveredList">
+            <div class="empty-state">No unregistered nodes detected</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="maint-grid">
+
+        <!-- Registered nodes -->
+        <div class="maint-section">
+          <div class="maint-section-head">
+            <span>REGISTERED NODES</span>
+            <span id="regNodeCount" style="color:var(--cyan)">0</span>
+          </div>
+          <div class="maint-section-body" id="registeredNodes">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <!-- Add new node manually -->
+        <div class="maint-section">
+          <div class="maint-section-head"><span>ADD NODE MANUALLY</span></div>
+          <div class="maint-section-body">
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:6px">
+              Use this to pre-register a node before its RPi is connected, or to re-add a node after removal.
+              The node_id must match the <code style="color:var(--cyan)">NODE_ID</code> in that device's <code style="color:var(--cyan)">config.py</code>.
+            </div>
+            <div class="add-node-form">
+              <div class="form-row">
+                <div>
+                  <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:.1em">NODE ID *</div>
+                  <input class="form-input" id="addNodeId" placeholder="node_5">
+                </div>
+                <div>
+                  <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:.1em">LOCATION</div>
+                  <input class="form-input" id="addNodeLoc" placeholder="Library - Room 204">
+                </div>
+              </div>
+              <div>
+                <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:4px;letter-spacing:.1em">NOTES (OPTIONAL)</div>
+                <input class="form-input" id="addNodeNotes" placeholder="Installed 2026-05-07, ceiling mount">
+              </div>
+              <button class="btn btn-cyan" style="align-self:flex-start" onclick="addNode()">+ REGISTER NODE</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Node diagnostics -->
+        <div class="maint-section">
+          <div class="maint-section-head"><span>NODE DIAGNOSTICS</span></div>
+          <div class="maint-section-body">
+            <div style="font-size:11px;color:var(--muted);margin-bottom:8px">
+              Select a node to view its last heartbeat, event count, and run diagnostic actions.
+            </div>
+            <select class="form-input" id="diagNodeSel" style="margin-bottom:8px" onchange="loadDiag()">
+              <option value="">Select node…</option>
+            </select>
+            <div id="diagPanel" style="display:none;flex-direction:column;gap:6px">
+              <div id="diagInfo" style="display:flex;flex-direction:column;gap:4px;margin-bottom:4px"></div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <button class="btn btn-cyan" onclick="diagPing()">🏓 PING</button>
+                <button class="btn btn-amber" onclick="diagClear()">🗑 CLEAR EVENTS</button>
+              </div>
+              <div id="diagResult" style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:4px"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- System info -->
+        <div class="maint-section">
+          <div class="maint-section-head"><span>SYSTEM INFO</span></div>
+          <div class="maint-section-body">
+            <div id="sysInfo" style="display:flex;flex-direction:column;gap:0"></div>
+          </div>
+        </div>
+
+      </div><!-- end maint-grid -->
+    </div><!-- end maint -->
+
+  </main>
+</div>
+
+<!-- Edit node modal -->
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <h4>EDIT NODE — <span id="editModalId" style="color:var(--text)"></span></h4>
+    <div class="modal-row">
+      <label>LOCATION / DISPLAY NAME</label>
+      <input id="editLocation" class="form-input">
+    </div>
+    <div class="modal-row">
+      <label>NOTES</label>
+      <textarea id="editNotes" class="form-input" rows="3" style="resize:vertical"></textarea>
+    </div>
+    <div class="toggle-pill">
+      <input type="checkbox" id="editEnabled" checked>
+      <span>Node enabled (uncheck to mark as decommissioned)</span>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-muted" onclick="closeEditModal()">CANCEL</button>
+      <button class="btn btn-cyan" onclick="saveEditModal()">SAVE CHANGES</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════════════════════════════════
+// GLOBALS & UTILITIES
+// ══════════════════════════════════════════════════════════════════════
+setInterval(() => {
+  document.getElementById('clock').textContent =
+    new Date().toLocaleTimeString('en-US', { hour12: false });
+}, 1000);
+
+const NODE_COLORS = {
+  node_1:'#00d4ff', node_2:'#00e676', node_3:'#ffb020',
+  node_4:'#c084fc', node_5:'#ff3d5a', node_6:'#4ade80',
+  node_sim:'#94a3b8', node_test:'#fbbf24', default:'#6a85a8',
+};
+function nodeColor(id) {
+  if (NODE_COLORS[id]) return NODE_COLORS[id];
+  // Generate deterministic color for unknown nodes
+  let h = 0; for (let c of (id||'')) h = (h*31 + c.charCodeAt(0)) & 0xffff;
+  return `hsl(${h % 360}, 65%, 60%)`;
+}
+
+function showToast(msg, type='ok') {
+  const t = document.createElement('div');
+  t.className = `toast ${type}`; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2800);
+}
+
+function confClass(c) { return c >= .8 ? 'high' : c >= .5 ? 'mid' : 'low'; }
+
+// ══════════════════════════════════════════════════════════════════════
+// TAB NAVIGATION
+// ══════════════════════════════════════════════════════════════════════
+let activeTab = 'live';
+document.querySelectorAll('.side-item[data-tab]').forEach(el => {
+  el.addEventListener('click', () => {
+    const tab = el.dataset.tab;
+    activeTab = tab;
+    document.querySelectorAll('.side-item[data-tab]').forEach(i => i.classList.remove('active'));
+    el.classList.add('active');
+    document.querySelectorAll('.tab-view').forEach(v => v.classList.remove('active'));
+    document.getElementById('tab-' + tab).classList.add('active');
+    // Lazy-load tab data on first switch
+    if (tab === 'history') histFetch(1);
+    if (tab === 'maint')   maintRefresh();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// RMS CHART
+// ══════════════════════════════════════════════════════════════════════
+const rmsCtx = document.getElementById('rmsChart').getContext('2d');
+let threshMult = 3.0;
+const rmsDatasets = {};
+const rmsChart = new Chart(rmsCtx, {
+  type:'line', data:{ labels:[], datasets:[] },
+  options:{
+    responsive:true, maintainAspectRatio:false, animation:{duration:200},
+    plugins:{
+      legend:{ display:true, position:'top',
+        labels:{ color:'#6a85a8', font:{family:"'Space Mono'",size:9}, boxWidth:12, padding:10 } },
+      tooltip:{ backgroundColor:'#0d1627', borderColor:'#1e3050', borderWidth:1,
+                titleColor:'#6a85a8', bodyColor:'#e2eaf5' }
+    },
+    scales:{
+      x:{ display:false },
+      y:{ min:0, max:1, grid:{color:'rgba(30,48,80,0.8)'},
+          ticks:{color:'#6a85a8', font:{family:"'Space Mono'",size:9}, maxTicksLimit:5} }
+    }
+  }
+});
+
+function threshDatasetIdx() { return rmsChart.data.datasets.findIndex(d=>d.label==='Threshold'); }
+
+function ensureNodeDataset(id) {
+  if (rmsDatasets[id] !== undefined) return;
+  rmsChart.data.datasets.push({ label:id, data:[], borderColor:nodeColor(id),
+    backgroundColor:'transparent', borderWidth:1.5, pointRadius:0, tension:0.2 });
+  rmsDatasets[id] = rmsChart.data.datasets.length - 1;
+}
+
+function setRmsData(rows) {
+  if (!rows.length) return;
+  const baseline = 0.06;
+  const thresh = Math.min(1, baseline * threshMult);
+  const byNode = {};
+  rows.forEach(r => { if(!byNode[r.node_id]) byNode[r.node_id]=[]; byNode[r.node_id].push(r); });
+  const firstNode = Object.keys(byNode).sort()[0];
+  rmsChart.data.labels = byNode[firstNode].map(r => r.ts.toFixed(0));
+  Object.entries(byNode).forEach(([id, frames]) => {
+    ensureNodeDataset(id);
+    rmsChart.data.datasets[rmsDatasets[id]].data = frames.map(r => r.rms);
+  });
+  let tIdx = threshDatasetIdx();
+  if (tIdx === -1) {
+    rmsChart.data.datasets.push({ label:'Threshold', data:[], borderColor:'rgba(255,61,90,0.6)',
+      borderWidth:1.5, borderDash:[4,4], pointRadius:0, backgroundColor:'transparent' });
+    tIdx = rmsChart.data.datasets.length - 1;
+  }
+  rmsChart.data.datasets[tIdx].data = rmsChart.data.labels.map(() => thresh);
+  rmsChart.update();
+}
+document.getElementById('threshSlider').addEventListener('input', e => {
+  threshMult = parseFloat(e.target.value);
+  document.getElementById('threshVal').textContent = threshMult.toFixed(1);
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// GAUGE
+// ══════════════════════════════════════════════════════════════════════
+const gaugeCtx = document.getElementById('gaugeCanvas').getContext('2d');
+const gaugeChart = new Chart(gaugeCtx, {
+  type:'doughnut',
+  data:{ datasets:[{ data:[0,1], backgroundColor:['rgba(0,212,255,.9)','rgba(30,48,80,.5)'],
+         borderWidth:0, borderRadius:3 }] },
+  options:{ responsive:true, maintainAspectRatio:false, cutout:'76%',
+    rotation:-110, circumference:220,
+    plugins:{ legend:{display:false}, tooltip:{enabled:false} },
+    animation:{ duration:600, easing:'easeInOutCubic' } }
+});
+
+function setGauge(score, isSusp) {
+  const color = isSusp ? 'rgba(255,61,90,.9)' : 'rgba(0,212,255,.9)';
+  gaugeChart.data.datasets[0].data = [score, 1-score];
+  gaugeChart.data.datasets[0].backgroundColor = [color, 'rgba(30,48,80,.5)'];
+  gaugeChart.update();
+  const el = document.getElementById('gaugeScore');
+  el.textContent = score.toFixed(2);
+  el.className = 'gauge-score ' + (isSusp ? 'alert' : 'ok');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// LIVE FEED RENDERERS
+// ══════════════════════════════════════════════════════════════════════
+let knownIds = new Set();
+function renderFeed(events) {
+  const feed = document.getElementById('eventFeed');
+  feed.innerHTML = '';
+  events.slice(0, 25).forEach(ev => {
+    const isNew = !knownIds.has(ev.id);
+    const conf = ev.confidence;
+    const timeStr = (ev.inserted_at || '').slice(11, 22) || '—';
+    const row = document.createElement('div');
+    row.className = `event-row ${ev.is_suspicious?'suspicious':''} ${isNew?'new-event':''}`;
+    const nc = nodeColor(ev.node_id);
+    row.innerHTML = `
+      <span class="ev-dot ${ev.is_suspicious?'alert':'ok'}"></span>
+      <span class="ev-node" style="color:${nc}">${ev.node_id}</span>
+      <div class="ev-label">
+        ${ev.is_suspicious
+          ? `<span style="color:var(--red)">${ev.label}</span>`
+          : `<span style="color:var(--muted)">${ev.label}</span>`}
+        <div class="sub">${ev.severity||''}</div>
+      </div>
+      <span class="ev-time">${timeStr}</span>
+      <span class="ev-conf ${confClass(conf)}">${conf.toFixed(2)}</span>
+    `;
+    feed.appendChild(row);
+  });
+  knownIds = new Set(events.map(e => e.id));
+  document.getElementById('feedCount').textContent = `${events.length} events`;
+  if (events.length > 0) {
+    const latest = events[0];
+    setGauge(latest.confidence, !!latest.is_suspicious);
+    document.getElementById('gaugeLabel').textContent = latest.is_suspicious ? 'SUSPICIOUS' : 'BACKGROUND';
+    document.getElementById('lastDetail').innerHTML = `
+      <div class="led-row"><span class="led-key">LABEL</span>
+        <span class="led-val ${latest.is_suspicious?'alert':'ok'}">${latest.label}</span></div>
+      <div class="led-row"><span class="led-key">NODE</span>
+        <span class="led-val" style="color:${nodeColor(latest.node_id)}">${latest.node_id}</span></div>
+      <div class="led-row"><span class="led-key">CONFIDENCE</span>
+        <span class="led-val">${latest.confidence.toFixed(3)}</span></div>
+      <div class="led-row"><span class="led-key">WALL CLOCK</span>
+        <span class="led-val">${latest.wall_clock_time ? new Date(latest.wall_clock_time*1000).toISOString().slice(11,23) : '—'}</span></div>
+    `;
+  }
+}
+
+function renderNodes(nodes) {
+  const sel = document.getElementById('nodeFilter');
+  const existing = Array.from(sel.options).map(o => o.value);
+  nodes.forEach(n => {
+    if (!existing.includes(n.node_id)) {
+      const opt = document.createElement('option');
+      opt.value = n.node_id; opt.textContent = n.node_id;
+      sel.appendChild(opt);
+    }
+  });
+
+  // Sidebar
+  const list = document.getElementById('nodeList');
+  list.innerHTML = '';
+  nodes.forEach(n => {
+    const el = document.createElement('div');
+    const isDisabled = n.enabled === 0;
+    el.className = `node-entry ${n.status==='online'?'online':'offline'} ${isDisabled?'disabled':''}`;
+    const nc = nodeColor(n.node_id);
+    el.innerHTML = `
+      <div class="node-name" style="color:${nc}">${(n.location||n.node_id).toUpperCase()}</div>
+      <div class="node-stats">
+        <span class="ns">${n.total_events||0} evt</span>
+        <span class="ns ${(n.suspicious_events||0)>0?'alert':''}"> ${n.suspicious_events||0} susp</span>
+        <span class="ns">${n.status==='online'?'● ON':'○ OFF'}</span>
+      </div>`;
+    list.appendChild(el);
+  });
+
+  // Node table
+  const tbody = document.getElementById('nodeTable');
+  tbody.innerHTML = '';
+  nodes.forEach(n => {
+    const tr = document.createElement('tr');
+    const nc = nodeColor(n.node_id);
+    tr.innerHTML = `
+      <td style="color:${nc};font-family:var(--mono)">${n.node_id}</td>
+      <td>${n.location||'—'}</td>
+      <td>${n.total_events||0}</td>
+      <td style="color:${(n.suspicious_events||0)>0?'var(--red)':'var(--muted)'}">${n.suspicious_events||0}</td>
+      <td><span class="badge ${n.status}">${(n.status||'unknown').toUpperCase()}</span></td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderCorrelated(rows) {
+  const tbody = document.getElementById('corrTable');
+  tbody.innerHTML = '';
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="4" style="color:var(--muted);text-align:center;padding:16px">No correlated events yet</td></tr>`;
+    return;
+  }
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="color:${nodeColor(r.node_a)};font-family:var(--mono)">${r.node_a}</td>
+      <td style="color:${nodeColor(r.node_b)};font-family:var(--mono)">${r.node_b}</td>
+      <td style="color:var(--muted)">${r.label_a||'—'}</td>
+      <td style="color:var(--cyan)">${r.delta_sec}s</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderLocalization(data) {
+  const panel = document.getElementById('locPanel');
+  const badge = document.getElementById('locBadge');
+  if (data.stub) {
+    panel.innerHTML = `<div class="loc-stub">
+      <div class="loc-stub-icon">📍</div>
+      <div class="loc-stub-title">TDOA LOCALIZATION MODULE</div>
+      <div class="loc-stub-body">Awaiting integration with the Sound Localization team.<br>
+        Subscribe topic: <code style="color:var(--cyan)">isd/localization/result</code></div>
+    </div>`;
+    badge.textContent = 'PENDING INTEGRATION'; badge.className = 'ph-badge purple'; return;
+  }
+  badge.textContent = 'LIVE'; badge.className = 'ph-badge';
+  panel.innerHTML = `<div class="loc-result" style="padding:16px">
+    <div class="led-row"><span class="led-key">LIKELY LOCATION</span>
+      <span class="led-val alert">${data.likely_location||'—'}</span></div>
+    <div class="led-row"><span class="led-key">NEAREST NODE</span>
+      <span class="led-val" style="color:${nodeColor(data.likely_node)}">${data.likely_node||'—'}</span></div>
+    <div class="led-row"><span class="led-key">CONFIDENCE</span>
+      <span class="led-val">${data.confidence!=null?data.confidence.toFixed(3):'—'}</span></div>
+  </div>`;
+}
+
+// ── Main poll loop ─────────────────────────────────────────────────────
+async function fetchAll() {
+  try {
+    const nf = document.getElementById('nodeFilter').value;
+    const evUrl  = nf ? `/api/events?limit=50&node=${nf}` : '/api/events?limit=50';
+    const rmsUrl = nf ? `/api/rms?node=${nf}` : '/api/rms';
+    const [events, stats, nodes, rms, corr, loc, status] = await Promise.all([
+      fetch(evUrl).then(r=>r.json()), fetch('/api/stats').then(r=>r.json()),
+      fetch('/api/nodes').then(r=>r.json()), fetch(rmsUrl).then(r=>r.json()),
+      fetch('/api/correlated').then(r=>r.json()), fetch('/api/localization').then(r=>r.json()),
+      fetch('/api/status').then(r=>r.json()),
+    ]);
+    const badge = document.getElementById('dbModeBadge');
+    if (status.db_mode === 'live') { badge.textContent='LIVE DATA'; badge.className='nav-badge'; }
+    else { badge.textContent='DEMO MODE'; badge.className='nav-badge demo'; }
+    document.getElementById('statTotal').textContent = stats.total_events;
+    document.getElementById('statSusp').textContent  = stats.suspicious_events;
+    document.getElementById('statNodes').textContent = stats.active_nodes;
+    document.getElementById('statConf').textContent  = stats.avg_confidence ?? '—';
+    renderFeed(events); renderNodes(nodes); setRmsData(rms); renderCorrelated(corr); renderLocalization(loc);
+  } catch(e) { console.error('Fetch error:', e); }
+}
+fetchAll();
+setInterval(fetchAll, 4000);
+document.getElementById('nodeFilter').addEventListener('change', fetchAll);
+
+// ══════════════════════════════════════════════════════════════════════
+// HISTORY TAB
+// ══════════════════════════════════════════════════════════════════════
+let histState = { page:1, total:0, pages:1 };
+
+async function histFetch(page=1) {
+  histState.page = page;
+  const params = new URLSearchParams({
+    page,
+    per: 50,
+    node:     document.getElementById('histNode').value,
+    label:    document.getElementById('histLabel').value,
+    severity: document.getElementById('histSeverity').value,
+    susp:     document.getElementById('histSuspOnly').checked ? '1' : '',
+    from:     (document.getElementById('histFrom').value||'').replace('T',' '),
+    to:       (document.getElementById('histTo').value||'').replace('T',' '),
+  });
+  // Remove empty params
+  for (const [k,v] of [...params.entries()]) if (!v) params.delete(k);
+
+  const data = await fetch('/api/history?' + params).then(r=>r.json());
+  histState.total = data.total; histState.pages = data.pages;
+  document.getElementById('histTotal').textContent = `${data.total} RECORDS`;
+  document.getElementById('histPageInfo').textContent = `page ${data.page} / ${data.pages||1}`;
+  document.getElementById('histPrev').disabled = data.page <= 1;
+  document.getElementById('histNext').disabled = data.page >= data.pages;
+
+  const tbody = document.getElementById('histTable');
+  tbody.innerHTML = '';
+  if (!data.rows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" style="color:var(--muted);text-align:center;padding:20px">No records match the current filters</td></tr>`;
+    return;
+  }
+  data.rows.forEach(r => {
+    const tr = document.createElement('tr');
+    const sevClass = r.severity==='HIGH'?'sev-high':r.severity==='MEDIUM'?'sev-med':'sev-low';
+    tr.innerHTML = `
+      <td style="color:var(--border2)">${r.id}</td>
+      <td style="color:${nodeColor(r.node_id)}">${r.node_id}</td>
+      <td style="color:${r.is_suspicious?'var(--red)':'var(--muted)'}">${r.label}</td>
+      <td class="${confClass(r.confidence)}" style="font-family:var(--mono)">${r.confidence.toFixed(3)}</td>
+      <td class="${sevClass}">${r.severity||'—'}</td>
+      <td>${r.is_suspicious ? '<span class="badge susp">YES</span>' : '<span class="badge bg">—</span>'}</td>
+      <td style="color:var(--muted);white-space:nowrap">${(r.inserted_at||'').slice(0,19)}</td>
+      <td style="color:var(--border2);font-size:9px">${(r.session_id||'').slice(0,12)||'—'}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function histPage(dir) { histFetch(Math.max(1, Math.min(histState.pages, histState.page+dir))); }
+
+function histClear() {
+  ['histNode','histLabel','histSeverity','histFrom','histTo'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('histSuspOnly').checked = false;
+  histFetch(1);
+}
+
+function histExportCSV() {
+  const params = new URLSearchParams({
+    page: 1, per: 5000,
+    node:     document.getElementById('histNode').value,
+    label:    document.getElementById('histLabel').value,
+    severity: document.getElementById('histSeverity').value,
+    susp:     document.getElementById('histSuspOnly').checked ? '1' : '',
+    from:     (document.getElementById('histFrom').value||'').replace('T',' '),
+    to:       (document.getElementById('histTo').value||'').replace('T',' '),
+  });
+  for (const [k,v] of [...params.entries()]) if (!v) params.delete(k);
+  fetch('/api/history?' + params).then(r=>r.json()).then(data => {
+    const cols = ['id','node_id','label','confidence','is_suspicious','severity','timestamp_node','wall_clock_time','inserted_at','session_id'];
+    const lines = [cols.join(',')];
+    data.rows.forEach(r => lines.push(cols.map(c => JSON.stringify(r[c]??'')).join(',')));
+    const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `isd_events_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  });
+}
+
+// Populate history node dropdown from live nodes
+async function populateHistoryNodeFilter() {
+  const nodes = await fetch('/api/nodes').then(r=>r.json());
+  const sel = document.getElementById('histNode');
+  const existing = Array.from(sel.options).map(o=>o.value);
+  nodes.forEach(n => {
+    if (!existing.includes(n.node_id)) {
+      const o = document.createElement('option');
+      o.value = n.node_id; o.textContent = n.node_id;
+      sel.appendChild(o);
+    }
+  });
+}
+populateHistoryNodeFilter();
+
+// ══════════════════════════════════════════════════════════════════════
+// QUERY LAB TAB
+// ══════════════════════════════════════════════════════════════════════
+const PRESETS = [
+  { label:'All suspicious events', sql:`SELECT id, node_id, label, confidence, severity, inserted_at\nFROM detection_events\nWHERE is_suspicious = 1\nORDER BY id DESC LIMIT 50` },
+  { label:'Per-node summary', sql:`SELECT node_id,\n  COUNT(*) AS total,\n  SUM(is_suspicious) AS suspicious,\n  ROUND(AVG(confidence), 3) AS avg_conf\nFROM detection_events\nGROUP BY node_id\nORDER BY suspicious DESC` },
+  { label:'Correlated events (Δt ≤ 2s)', sql:`SELECT a.node_id AS node_a, b.node_id AS node_b,\n  a.label, ROUND(ABS(a.wall_clock_time - b.wall_clock_time),4) AS delta_sec,\n  a.inserted_at\nFROM detection_events a\nJOIN detection_events b ON a.id < b.id\nWHERE a.is_suspicious=1 AND b.is_suspicious=1\n  AND ABS(a.wall_clock_time - b.wall_clock_time) <= 2.0\nORDER BY a.id DESC LIMIT 20` },
+  { label:'High confidence (≥ 0.85)', sql:`SELECT id, node_id, label, confidence, inserted_at\nFROM detection_events\nWHERE confidence >= 0.85\nORDER BY confidence DESC LIMIT 50` },
+  { label:'Node status', sql:`SELECT node_id, location, status, enabled, notes,\n  datetime(last_seen,'unixepoch') AS last_seen_dt\nFROM node_status\nORDER BY node_id` },
+  { label:'Events last 24h', sql:`SELECT id, node_id, label, confidence, is_suspicious, inserted_at\nFROM detection_events\nWHERE inserted_at >= datetime('now','-24 hours')\nORDER BY id DESC LIMIT 100` },
+  { label:'RMS trigger events', sql:`SELECT node_id, datetime(ts,'unixepoch') AS ts,\n  ROUND(rms,5) AS rms, ROUND(baseline,5) AS baseline,\n  ROUND(threshold,5) AS threshold\nFROM rms_frames\nWHERE is_trigger=1\nORDER BY id DESC LIMIT 50` },
+];
+
+const presetsEl = document.getElementById('presets');
+PRESETS.forEach(p => {
+  const btn = document.createElement('button');
+  btn.className = 'preset-btn'; btn.textContent = p.label;
+  btn.onclick = () => { document.getElementById('sqlInput').value = p.sql; };
+  presetsEl.appendChild(btn);
+});
+
+async function runQuery() {
+  const sql = document.getElementById('sqlInput').value.trim();
+  if (!sql) return;
+  document.getElementById('queryError').style.display = 'none';
+  document.getElementById('queryResultWrap').style.display = 'none';
+  document.getElementById('queryMeta').innerHTML = '';
+  const t0 = performance.now();
+  try {
+    const res = await fetch('/api/admin/query', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ sql })
+    });
+    const data = await res.json();
+    const elapsed = (performance.now() - t0).toFixed(0);
+    if (!res.ok) {
+      document.getElementById('queryError').textContent = '⚠ ' + data.error;
+      document.getElementById('queryError').style.display = 'block'; return;
+    }
+    document.getElementById('queryMeta').innerHTML =
+      `<span>${data.count}</span> rows · <span>${elapsed}ms</span>`;
+    // Render table
+    const head = document.getElementById('queryHead');
+    const body = document.getElementById('queryBody');
+    head.innerHTML = '<tr>' + data.cols.map(c=>`<th>${c}</th>`).join('') + '</tr>';
+    body.innerHTML = '';
+    data.rows.forEach(r => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = data.cols.map(c => `<td>${r[c]??''}</td>`).join('');
+      body.appendChild(tr);
+    });
+    document.getElementById('queryResultWrap').style.display = 'block';
+  } catch(e) {
+    document.getElementById('queryError').textContent = '⚠ ' + e.message;
+    document.getElementById('queryError').style.display = 'block';
+  }
+}
+document.getElementById('sqlInput').addEventListener('keydown', e => {
+  if (e.ctrlKey && e.key === 'Enter') runQuery();
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// MAINTENANCE TAB
+// ══════════════════════════════════════════════════════════════════════
+let maintNodes = [];
+let editTarget = null;
+
+async function maintRefresh() {
+  const [nodes, discovered, stats] = await Promise.all([
+    fetch('/api/admin/nodes').then(r=>r.json()),
+    fetch('/api/admin/nodes/discovered').then(r=>r.json()),
+    fetch('/api/stats').then(r=>r.json()),
+  ]);
+  maintNodes = nodes;
+
+  // Discovered
+  document.getElementById('discoveredBadge').textContent = `${discovered.length} NEW`;
+  const discList = document.getElementById('discoveredList');
+  if (!discovered.length) {
+    discList.innerHTML = '<div class="empty-state">No unregistered nodes detected</div>';
+  } else {
+    discList.innerHTML = '';
+    discovered.forEach(d => {
+      const row = document.createElement('div');
+      row.className = 'disco-row';
+      row.innerHTML = `
+        <div>
+          <div class="disco-id">${d.node_id}</div>
+          <div class="disco-meta">${d.event_count} events · last seen ${(d.last_event||'').slice(0,19)}</div>
+        </div>
+        <button class="btn btn-amber" onclick="registerDiscovered('${d.node_id}')">REGISTER</button>
+      `;
+      discList.appendChild(row);
+    });
+  }
+
+  // Registered nodes
+  document.getElementById('regNodeCount').textContent = nodes.length;
+  const regList = document.getElementById('registeredNodes');
+  regList.innerHTML = '';
+  if (!nodes.length) {
+    regList.innerHTML = '<div class="empty-state">No nodes registered</div>';
+  } else {
+    nodes.forEach(n => {
+      const isDisabled = n.enabled === 0;
+      const row = document.createElement('div');
+      row.className = `node-admin-row ${isDisabled?'disabled-node':''}`;
+      const nc = nodeColor(n.node_id);
+      row.innerHTML = `
+        <div class="node-admin-info">
+          <div class="nai-id" style="color:${nc}">
+            ${n.node_id}
+            <span class="badge ${n.status}" style="margin-left:6px">${n.status.toUpperCase()}</span>
+            ${isDisabled ? '<span class="badge disabled" style="margin-left:4px">DISABLED</span>' : ''}
+          </div>
+          <div class="nai-loc">${n.location||'No location set'} · ${n.total_events||0} events · ${n.suspicious_events||0} suspicious</div>
+          ${n.notes ? `<div class="nai-notes">${n.notes}</div>` : ''}
+        </div>
+        <div class="node-admin-actions">
+          <button class="icon-btn edit" title="Edit" onclick="openEditModal('${n.node_id}')">✎</button>
+          <button class="icon-btn danger" title="Remove" onclick="removeNode('${n.node_id}')">✕</button>
+        </div>
+      `;
+      regList.appendChild(row);
+    });
+  }
+
+  // Diagnostic node selector
+  const diagSel = document.getElementById('diagNodeSel');
+  const existingDiag = Array.from(diagSel.options).map(o=>o.value);
+  nodes.forEach(n => {
+    if (!existingDiag.includes(n.node_id)) {
+      const o = document.createElement('option');
+      o.value = n.node_id; o.textContent = `${n.node_id} (${n.location||'?'})`;
+      diagSel.appendChild(o);
+    }
+  });
+
+  // System info
+  document.getElementById('sysInfo').innerHTML = `
+    <div class="led-row"><span class="led-key">DB MODE</span>
+      <span class="led-val" style="color:var(--cyan)">${stats.db_mode?.toUpperCase()||'—'}</span></div>
+    <div class="led-row"><span class="led-key">TOTAL EVENTS</span>
+      <span class="led-val">${stats.total_events}</span></div>
+    <div class="led-row"><span class="led-key">SUSPICIOUS EVENTS</span>
+      <span class="led-val" style="color:var(--red)">${stats.suspicious_events}</span></div>
+    <div class="led-row"><span class="led-key">NODES ONLINE</span>
+      <span class="led-val" style="color:var(--green)">${stats.active_nodes}</span></div>
+    <div class="led-row"><span class="led-key">NODES REGISTERED</span>
+      <span class="led-val">${nodes.length}</span></div>
+    <div class="led-row"><span class="led-key">DASHBOARD TIME</span>
+      <span class="led-val">${new Date().toLocaleTimeString()}</span></div>
+  `;
+}
+
+async function registerDiscovered(nodeId) {
+  const res = await fetch('/api/admin/nodes', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ node_id: nodeId, location: '', notes: 'Auto-registered from discovery' })
+  });
+  if (res.ok) { showToast(`${nodeId} registered`); maintRefresh(); }
+  else { const d = await res.json(); showToast(d.error || 'Error', 'err'); }
+}
+
+async function addNode() {
+  const node_id  = document.getElementById('addNodeId').value.trim();
+  const location = document.getElementById('addNodeLoc').value.trim();
+  const notes    = document.getElementById('addNodeNotes').value.trim();
+  if (!node_id) { showToast('Node ID is required', 'err'); return; }
+  const res = await fetch('/api/admin/nodes', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ node_id, location, notes })
+  });
+  const data = await res.json();
+  if (res.ok) {
+    showToast(`${node_id} registered`);
+    document.getElementById('addNodeId').value = '';
+    document.getElementById('addNodeLoc').value = '';
+    document.getElementById('addNodeNotes').value = '';
+    maintRefresh();
+  } else { showToast(data.error || 'Error', 'err'); }
+}
+
+async function removeNode(id) {
+  if (!confirm(`Remove node "${id}" from the database?\n\nThis only removes the registration record — historical events are preserved.`)) return;
+  const res = await fetch(`/api/admin/nodes/${id}`, { method:'DELETE' });
+  if (res.ok) { showToast(`${id} removed`); maintRefresh(); }
+  else showToast('Error removing node', 'err');
+}
+
+// Edit modal
+function openEditModal(id) {
+  editTarget = id;
+  const node = maintNodes.find(n => n.node_id === id);
+  if (!node) return;
+  document.getElementById('editModalId').textContent = id;
+  document.getElementById('editLocation').value = node.location || '';
+  document.getElementById('editNotes').value = node.notes || '';
+  document.getElementById('editEnabled').checked = node.enabled !== 0;
+  document.getElementById('editModal').classList.add('open');
+}
+function closeEditModal() {
+  document.getElementById('editModal').classList.remove('open');
+  editTarget = null;
+}
+async function saveEditModal() {
+  if (!editTarget) return;
+  const payload = {
+    location: document.getElementById('editLocation').value.trim(),
+    notes:    document.getElementById('editNotes').value.trim(),
+    enabled:  document.getElementById('editEnabled').checked,
+  };
+  const res = await fetch(`/api/admin/nodes/${editTarget}`, {
+    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  });
+  if (res.ok) { showToast('Node updated'); closeEditModal(); maintRefresh(); }
+  else showToast('Update failed', 'err');
+}
+document.getElementById('editModal').addEventListener('click', e => {
+  if (e.target === document.getElementById('editModal')) closeEditModal();
+});
+
+// Diagnostics
+function loadDiag() {
+  const id = document.getElementById('diagNodeSel').value;
+  const panel = document.getElementById('diagPanel');
+  if (!id) { panel.style.display = 'none'; return; }
+  const node = maintNodes.find(n => n.node_id === id);
+  panel.style.display = 'flex';
+  document.getElementById('diagResult').textContent = '';
+  document.getElementById('diagInfo').innerHTML = node ? `
+    <div class="led-row"><span class="led-key">STATUS</span>
+      <span class="led-val" style="color:${node.status==='online'?'var(--green)':'var(--muted)'}">${node.status.toUpperCase()}</span></div>
+    <div class="led-row"><span class="led-key">LAST SEEN</span>
+      <span class="led-val">${node.last_seen ? new Date(node.last_seen*1000).toLocaleString() : 'Never'}</span></div>
+    <div class="led-row"><span class="led-key">EVENTS</span>
+      <span class="led-val">${node.total_events||0} total · ${node.suspicious_events||0} suspicious</span></div>
+    <div class="led-row"><span class="led-key">LOCATION</span>
+      <span class="led-val">${node.location||'—'}</span></div>
+  ` : '';
+}
+
+async function diagPing() {
+  const id = document.getElementById('diagNodeSel').value;
+  if (!id) return;
+  const res = await fetch(`/api/admin/nodes/${id}/ping`, { method:'POST' });
+  const data = await res.json();
+  document.getElementById('diagResult').textContent = res.ok
+    ? `✓ Ping recorded at ${new Date(data.pinged_at).toLocaleTimeString()}`
+    : `⚠ Ping failed`;
+  if (res.ok) maintRefresh();
+}
+
+async function diagClear() {
+  const id = document.getElementById('diagNodeSel').value;
+  if (!id) return;
+  if (!confirm(`Clear ALL detection events and RMS frames for node "${id}"?\n\nThis cannot be undone.`)) return;
+  const res = await fetch(`/api/admin/nodes/${id}/clear`, { method:'POST' });
+  if (res.ok) { showToast(`Events cleared for ${id}`); document.getElementById('diagResult').textContent = '✓ Events cleared'; maintRefresh(); }
+  else showToast('Clear failed', 'err');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+{
+  "name": "isd-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "sql.js": "^1.12.0",
+    "express": "^4.18.2",
+    "cors": "^2.8.5"
+  }
+}

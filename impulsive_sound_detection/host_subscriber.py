@@ -47,7 +47,8 @@ from .classifier import ClassificationResult
 
 logger = logging.getLogger(__name__)
 
-HOST_DB_PATH: Path = config.ISD_ROOT / "host.db"
+# Write host.db into the repo's logs/ folder so Docker can mount it
+HOST_DB_PATH: Path = Path(__file__).resolve().parent.parent / "logs" / "host.db"
 NODE_TIMEOUT_SEC: float = 30.0
 
 
@@ -159,7 +160,7 @@ class HostSubscriber:
         """Create or connect to the host SQLite database."""
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False)
-        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA journal_mode=DELETE")
         self._db.executescript("""
             CREATE TABLE IF NOT EXISTS detection_events (
                 id                  INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -113,15 +113,15 @@ LOG_DIR: Path = ISD_ROOT / "logs"
 # ──────────────────────────────────────────────────────────────────────
 # 10. NODE IDENTITY  ← edit per-device on each RPi before deployment
 # ──────────────────────────────────────────────────────────────────────
-NODE_ID: str = "node_1"             # Unique: node_1 … node_N
-NODE_LOCATION: str = "Hallway A"    # Human-readable label
+NODE_ID: str = "node_test"
+NODE_LOCATION: str = "Local Dev Machine"
 
 # ──────────────────────────────────────────────────────────────────────
 # 11. MQTT  ← shared broker settings
 # ──────────────────────────────────────────────────────────────────────
 # Set MQTT_BROKER_HOST to the LAN IP of the host machine running
 # the dashboard.  All RPi nodes publish to this address.
-MQTT_BROKER_HOST: str = "192.168.1.100"
+MQTT_BROKER_HOST: str = "127.0.0.1"   # localhost instead of the real host IP
 MQTT_BROKER_PORT: int = 1883
 MQTT_KEEPALIVE_SEC: int = 60
 
