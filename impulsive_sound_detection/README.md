@@ -1,63 +1,89 @@
 # Impulsive Sound Detection (ISD) System
 
-**ENEB453 Web-Based Application Development — Spring 2026**  
-**Team:** Mathew Ridgely · Sholom kott (Web App) · Charlie Holden (ML Pipeline)
+**ENEB453 Web-Based Application Development — Spring 2026**
+**Team:** Mathew Ridgely · Skott (Web App) · Charlie Holden (ML Pipeline)
+**Instructor:** Dr. Nestor Michael C. Tiglao
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [System Architecture](#system-architecture)
+3. [Repository Structure](#repository-structure)
+4. [Prerequisites](#prerequisites)
+5. [Initial Setup — Host Machine](#initial-setup--host-machine)
+6. [Initial Setup — RPi5 Node](#initial-setup--rpi5-node)
+7. [Running the System](#running-the-system)
+8. [Dashboard Overview](#dashboard-overview)
+9. [Database Schema](#database-schema)
+10. [REST API Reference](#rest-api-reference)
+11. [Authentication & Security](#authentication--security)
+12. [Local Test Cases](#local-test-cases)
+13. [Integrated Test Cases](#integrated-test-cases)
+14. [Troubleshooting](#troubleshooting)
+15. [Scalability — Adding New Nodes](#scalability--adding-new-nodes)
+16. [Scalability — Admin Account Management](#scalability--admin-account-management)
+17. [Limitations & Future Work](#limitations--future-work)
+18. [Technologies Used](#technologies-used)
+19. [AI Tool Disclosure](#ai-tool-disclosure)
 
 ---
 
 ## Overview
 
-The Impulsive Sound Detection (ISD) system is a full-stack cyber-physical web application for real-time gunshot and glass-break detection in school environments. It combines a two-stage machine learning audio pipeline running on Raspberry Pi 5 compute nodes with a multi-node MQTT messaging architecture and a Node.js/Express web dashboard.
+The ISD system detects gunshots and glass breaks in real time using a network of Raspberry Pi 5 compute modules equipped with MEMS microphones. Each node runs a two-stage ML pipeline locally and publishes results over MQTT to a central host machine running a Node.js/Express web dashboard.
 
-### Key Features
-
-- **Two-stage ML pipeline** — RMS energy trigger (Stage 1) feeds YAMNet or a custom EfficientNetB0 CNN classifier (Stage 2)
-- **Multi-node MQTT architecture** — RPi5 nodes publish detections, RMS frames, and heartbeats to a central broker
-- **Live web dashboard** — four-tab interface: Live Feed, Event History, Query Lab, Maintenance Mode
-- **Node management** — auto-discovery of new nodes, registration, renaming, diagnostics
-- **Authenticated admin routes** — API key protection on all write/admin endpoints
-- **Dockerized deployment** — single `docker compose up` starts the dashboard server
+**Key capabilities:**
+- Real-time acoustic event detection with sub-second latency from trigger to dashboard alert
+- Multi-node coverage with per-node status monitoring and correlated event detection
+- Server-Sent Events (SSE) push — suspicious detections appear on the dashboard instantly without polling
+- Maintenance Mode for adding, renaming, diagnosing, and removing nodes at any time
+- Bcrypt-authenticated admin routes with HTTPS transport
 
 ---
 
 ## System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        HOST MACHINE                             │
-│                                                                 │
-│  ┌──────────────────┐    ┌────────────────────────────────┐    │
-│  │  host_subscriber │    │   dashboard_server (Docker)    │    │
-│  │  (Python)        │───▶│   Node.js + Express            │    │
-│  │  writes host.db  │    │   sql.js reads host.db         │    │
-│  └──────────────────┘    │   serves http://localhost:3000 │    │
-│           ▲              └────────────────────────────────┘    │
-│           │ MQTT subscribe                                      │
-│  ┌────────┴─────────┐                                          │
-│  │ Mosquitto Broker │                                          │
-│  │ port 1883        │                                          │
-│  └────────┬─────────┘                                          │
-└───────────┼─────────────────────────────────────────────────────┘
-            │ MQTT publish
-  ┌─────────┴──────────────────────────────────────────┐
-  │              RPi5 NODE NETWORK (LAN)                │
-  │                                                     │
-  │  ┌────────────┐  ┌────────────┐  ┌────────────┐   │
-  │  │  node_1    │  │  node_2    │  │  node_N    │   │
-  │  │  RPi5      │  │  RPi5      │  │  RPi5      │   │
-  │  │  MEMS Mic  │  │  MEMS Mic  │  │  MEMS Mic  │   │
-  │  │  YAMNet    │  │  YAMNet    │  │  YAMNet    │   │
-  │  └────────────┘  └────────────┘  └────────────┘   │
-  └─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          HOST MACHINE                               │
+│                                                                     │
+│  ┌───────────────────┐     ┌──────────────────────────────────┐    │
+│  │  host_subscriber  │     │   dashboard_server  (Docker)     │    │
+│  │  (Python)         │────▶│   Node.js + Express              │    │
+│  │  writes host.db   │     │   sql.js reads host.db           │    │
+│  │  notifies SSE     │     │   https://localhost:3443         │    │
+│  └───────────────────┘     └──────────────────────────────────┘    │
+│           ▲                                                         │
+│           │  MQTT subscribe (all topics)                            │
+│  ┌────────┴──────────┐                                             │
+│  │  Mosquitto Broker │                                             │
+│  │  port 1883        │                                             │
+│  └────────┬──────────┘                                             │
+└───────────┼─────────────────────────────────────────────────────────┘
+            │  MQTT publish over LAN
+  ┌─────────┴────────────────────────────────────────────┐
+  │                  RPi5 NODE NETWORK                    │
+  │                                                       │
+  │  ┌───────────┐   ┌───────────┐   ┌───────────┐      │
+  │  │  node_1   │   │  node_2   │   │  node_N   │      │
+  │  │  RPi5     │   │  RPi5     │   │  RPi5     │      │
+  │  │  MEMS Mic │   │  MEMS Mic │   │  MEMS Mic │      │
+  │  │  YAMNet   │   │  YAMNet   │   │  YAMNet   │      │
+  │  └───────────┘   └───────────┘   └───────────┘      │
+  └───────────────────────────────────────────────────────┘
 ```
 
 ### ML Pipeline (per node)
 
 ```
-Audio Input → Pre-emphasis → 512-sample RMS frames
-    → Rolling Baseline Comparison (Stage 1: energy trigger)
-        → 0.975s window → YAMNet / EfficientNetB0 (Stage 2)
-            → ClassificationResult → MQTT publish → host.db
+Microphone → RMS Frames (512 samples)
+  → Stage 1: Rolling baseline comparison
+    → Trigger (energy > N × baseline)
+      → Stage 2: YAMNet / EfficientNetB0 CNN
+        → ClassificationResult
+          → MQTT publish → host_subscriber → host.db → SSE push → Dashboard
 ```
 
 ---
@@ -66,63 +92,67 @@ Audio Input → Pre-emphasis → 512-sample RMS frames
 
 ```
 ImpulsiveSoundDetection/
-├── impulsive_sound_detection/          ← Python package (RPi + host)
-│   ├── config.py                       ← All constants, node identity, MQTT settings
+├── impulsive_sound_detection/
+│   ├── config.py                       ← All constants — edit per device
 │   ├── pipeline.py                     ← Stage 1 + 2 orchestration
 │   ├── stream_monitor.py               ← Stage 1: RMS energy trigger
-│   ├── classifier.py                   ← Stage 2: YAMNet + CNN classifiers
+│   ├── classifier.py                   ← Stage 2: YAMNet + CNN
 │   ├── mqtt_bridge.py                  ← Node-side MQTT publisher
-│   ├── host_subscriber.py              ← Host-side MQTT subscriber → host.db
-│   ├── event_logger.py                 ← SQLite + JSONL event logging
+│   ├── host_subscriber.py              ← Host-side subscriber → host.db + SSE
+│   ├── event_logger.py                 ← SQLite + JSONL logging
 │   ├── live_stream.py                  ← Live microphone capture
 │   ├── main.py                         ← CLI entry point
-│   ├── data_loader.py                  ← VOICe dataset loader
-│   ├── augmentor.py                    ← Audio augmentation
-│   ├── spectrogram_utils.py            ← FFT / LogMel / MFCC spectrogram rendering
-│   ├── visualizer.py                   ← Detection plots (matplotlib)
-│   ├── dashboard.py                    ← Terminal dashboard (ANSI)
+│   ├── spectrogram_utils.py            ← FFT / LogMel / MFCC rendering
+│   ├── visualizer.py                   ← Detection plots
+│   ├── dashboard.py                    ← Terminal dashboard
 │   ├── gui.py                          ← GUI dashboard (customtkinter)
-│   └── dashboard_server/               ← Web dashboard (Docker)
-│       ├── index.js                    ← Express server + sql.js + REST API
+│   └── dashboard_server/
+│       ├── index.js                    ← Express server + REST API + SSE
 │       ├── public/index.html           ← Single-page dashboard (4 tabs)
 │       ├── package.json
 │       ├── Dockerfile
-│       ├── docker-compose.yml
-│       ├── .env.example                ← Copy to .env and fill in values
+│       ├── docker-compose.yml          ← Edit: hash + cert paths
+│       ├── generate-cert.ps1           ← Run once to create TLS certs
+│       ├── .env.example                ← Copy to .env and fill in
 │       └── .dockerignore
 ├── train/                              ← EfficientNetB0 training scripts
-│   ├── train.py
-│   ├── model.py
-│   ├── dataset.py
-│   ├── feature_sweep.py
-│   └── evaluate.py
-├── models/                             ← Trained .keras + .tflite models (not in git)
-├── reports/                            ← Training metrics, confusion matrices
-├── logs/                               ← host.db + per-node JSONL logs
-├── test_mqtt.py                        ← Publish a fake detection over MQTT
-├── test_pipeline.py                    ← Run full pipeline on a WAV file with MQTT
-├── test_audio.py                       ← Generate synthetic spike/sine/sawtooth WAVs
-├── simulate_live.py                    ← Stream a WAV at real-time speed (mic substitute)
-└── check_db.py                         ← Inspect host.db schema and contents
+├── models/                             ← Trained .keras models (not in git)
+├── reports/                            ← Confusion matrices, ROC/PR curves
+├── logs/                               ← host.db + JSONL logs (not in git)
+├── test_mqtt.py                        ← Publish a fake MQTT detection
+├── test_pipeline.py                    ← Run pipeline on WAV + publish
+├── test_audio.py                       ← Generate synthetic WAV files
+├── simulate_live.py                    ← Stream WAV at real-time speed
+├── check_db.py                         ← Inspect host.db contents
+└── README.md
 ```
 
 ---
 
 ## Prerequisites
 
-### Host Machine
-- Python 3.10 or 3.11 (64-bit)
-- Docker Desktop (for the web dashboard)
-- Mosquitto MQTT broker
+### Host Machine (Windows / Linux / macOS)
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| Python | 3.10 or 3.11 | 64-bit |
+| Node.js | 18+ | For bcrypt hash generation |
+| Docker Desktop | Latest | For the web dashboard |
+| Git | Any | OpenSSL bundled in Git for Windows |
+| Mosquitto | 2.x | MQTT broker |
 
 ### RPi5 Nodes
-- Raspberry Pi 5 with MEMS microphone
-- Python 3.10+ with all dependencies (see below)
-- Network access to the host machine
+
+| Requirement | Notes |
+|-------------|-------|
+| Raspberry Pi 5 | Any RAM config |
+| MEMS microphone | I2S or USB interface |
+| Python 3.10+ | Pre-installed on Pi OS |
+| LAN access to host | Same network as host machine |
 
 ---
 
-## Setup — Host Machine
+## Initial Setup — Host Machine
 
 ### 1. Clone the repository
 
@@ -131,7 +161,7 @@ git clone https://github.com/<your-org>/ImpulsiveSoundDetection.git
 cd ImpulsiveSoundDetection
 ```
 
-### 2. Create and activate a virtual environment
+### 2. Create Python virtual environment
 
 ```bash
 python -m venv venv
@@ -156,18 +186,30 @@ pip install tensorflow tensorflow-hub librosa audiomentations \
 **Windows:**
 ```powershell
 winget install EclipseFoundation.Mosquitto
-# Run as Administrator:
+
+# Start as a service (run PowerShell as Administrator)
 net start mosquitto
-# Or run directly:
+
+# Or run directly in a terminal
 & "C:\Program Files\mosquitto\mosquitto.exe" -v
 ```
 
-**Linux/macOS:**
+**Linux / macOS:**
 ```bash
 sudo apt install mosquitto mosquitto-clients   # Debian/Ubuntu
 brew install mosquitto                          # macOS
-sudo systemctl start mosquitto
+sudo systemctl enable --now mosquitto
 ```
+
+**Allow remote connections** (required for RPi nodes on the LAN).
+Create or edit `mosquitto.conf` (usually at `C:\Program Files\mosquitto\mosquitto.conf`):
+
+```
+listener 1883
+allow_anonymous true
+```
+
+Restart after editing: `net stop mosquitto && net start mosquitto`
 
 ### 5. Create the logs directory
 
@@ -175,104 +217,247 @@ sudo systemctl start mosquitto
 mkdir -p logs
 ```
 
-### 6. Configure the dashboard environment
+### 6. Configure the dashboard
 
 ```bash
 cd impulsive_sound_detection/dashboard_server
 cp .env.example .env
 ```
 
-Edit `.env`:
-```
-ISD_DB_PATH=C:\Github\ImpulsiveSoundDetection\logs\host.db
-ADMIN_API_KEY=your-secret-key-here
-PORT=3000
-```
+#### 6a. Install Node dependencies and generate bcrypt hash
 
-Generate a secure key:
-```bash
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```powershell
+npm install
+
+# Generate a bcrypt hash of your chosen admin password
+node -e "require('bcrypt').hash('your-password-here', 12).then(console.log)"
 ```
 
-### 7. Update config.py for your machine
+This takes a few seconds. Copy the printed `$2b$12$...` string — you need it next.
 
-Edit `impulsive_sound_detection/config.py`:
+#### 6b. Generate TLS certificate for HTTPS
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\certs
+
+& "C:\Program Files\Git\usr\bin\openssl.exe" req -x509 -nodes -newkey rsa:2048 `
+  -keyout .\certs\server.key `
+  -out    .\certs\server.crt `
+  -days   365 `
+  -subj   "/C=US/ST=MD/L=College Park/O=ISD System/CN=localhost" `
+  -addext "subjectAltName=IP:127.0.0.1,IP:192.168.1.100,DNS:localhost"
+```
+
+Replace `192.168.1.100` with your actual host LAN IP (`ipconfig` to find it).
+
+#### 6c. Edit docker-compose.yml
+
+```yaml
+services:
+  isd-dashboard:
+    build: .
+    container_name: isd-dashboard
+    ports:
+      - "3000:3000"
+      - "3443:3443"
+    volumes:
+      - C:\Github\ImpulsiveSoundDetection\logs:/data
+      - .\certs:/certs:ro
+    environment:
+      - ISD_DB_PATH=/data/host.db
+      - ADMIN_PASSWORD_HASH=$2b$12$...paste your hash here...
+      - PORT=3000
+      - HTTPS_PORT=3443
+      - CERT_PATH=/certs/server.crt
+      - KEY_PATH=/certs/server.key
+    restart: unless-stopped
+```
+
+#### 6d. Update config.py
+
 ```python
-ISD_ROOT          = Path(r"C:\ImpulsiveSoundDetection")   # your data root
-MQTT_BROKER_HOST  = "127.0.0.1"                           # or host LAN IP
-NODE_ID           = "node_1"                               # unique per device
-NODE_LOCATION     = "Hallway A"
+# impulsive_sound_detection/config.py
+ISD_ROOT         = Path(r"C:\Github\ImpulsiveSoundDetection")
+MQTT_BROKER_HOST = "127.0.0.1"   # change to LAN IP when RPi nodes are active
+```
+
+#### 6e. Add to .gitignore
+
+```gitignore
+impulsive_sound_detection/dashboard_server/certs/
+impulsive_sound_detection/dashboard_server/.env
+impulsive_sound_detection/dashboard_server/node_modules/
+logs/host.db
+logs/*.jsonl
+models/**/*.keras
+models/**/*.tflite
+```
+
+---
+
+## Initial Setup — RPi5 Node
+
+Repeat for each physical RPi. Each node **must** have a unique `NODE_ID`.
+
+### 1. Install dependencies
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install python3-pip python3-venv -y
+
+cd ~
+git clone https://github.com/<your-org>/ImpulsiveSoundDetection.git
+cd ImpulsiveSoundDetection
+
+python3 -m venv venv
+source venv/bin/activate
+
+pip install tensorflow tensorflow-hub librosa sounddevice soundfile \
+            numpy scipy scikit-learn paho-mqtt rich
+```
+
+### 2. Configure the node
+
+Edit `impulsive_sound_detection/config.py` on **this device only**:
+
+```python
+# Section 10 — NODE IDENTITY
+NODE_ID       = "node_1"           # unique across ALL nodes — no duplicates
+NODE_LOCATION = "Hallway A"        # human-readable location for the dashboard
+
+# Section 11 — MQTT
+MQTT_BROKER_HOST = "192.168.1.100" # LAN IP of the host machine running Mosquitto
+```
+
+> **Critical:** If two nodes share the same `NODE_ID`, their data will collide
+> in the database and the dashboard will show incorrect event counts and locations.
+
+### 3. Test microphone access
+
+```bash
+python -m impulsive_sound_detection.main live --threshold-multiplier 3.0
+```
+
+You should see the terminal dashboard updating with RMS values. Press Ctrl+C to stop.
+
+### 4. Run as a systemd service (auto-start on boot)
+
+Create `/etc/systemd/system/isd-node.service`:
+
+```ini
+[Unit]
+Description=ISD Node Detection Pipeline
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/ImpulsiveSoundDetection
+ExecStart=/home/pi/ImpulsiveSoundDetection/venv/bin/python \
+          -m impulsive_sound_detection.main live \
+          --mqtt --broker-host 192.168.1.100 \
+          --node-id node_1 \
+          --threshold-multiplier 2.0
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable isd-node
+sudo systemctl start isd-node
+sudo systemctl status isd-node
 ```
 
 ---
 
 ## Running the System
 
-### Terminal 1 — MQTT Broker
-```bash
-# If not running as a service:
+Start these in order every time:
+
+**Terminal 1 — MQTT Broker**
+```powershell
 & "C:\Program Files\mosquitto\mosquitto.exe" -v
 ```
 
-### Terminal 2 — Host Subscriber (writes host.db)
-```bash
-cd ImpulsiveSoundDetection
-python -m impulsive_sound_detection.host_subscriber --broker-host 127.0.0.1
+**Terminal 2 — Host Subscriber**
+```powershell
+cd C:\Github\ImpulsiveSoundDetection
+python -m impulsive_sound_detection.host_subscriber `
+    --broker-host 127.0.0.1 `
+    --dashboard-url https://localhost:3443
 ```
+
 Expected output:
 ```
 Host database ready at C:\Github\ImpulsiveSoundDetection\logs\host.db
 HostSubscriber running – waiting for node data …
 ```
 
-### Terminal 3 — Web Dashboard (Docker)
-```bash
-cd impulsive_sound_detection/dashboard_server
+**Terminal 3 — Web Dashboard**
+```powershell
+cd impulsive_sound_detection\dashboard_server
 docker compose up --build
 ```
-Open **http://localhost:3000**
 
-### Terminal 4 — Node Simulation (dev/test)
+Expected output:
+```
+ISD Dashboard → https://localhost:3443  (HTTPS)
+Database mode : LIVE
+HTTP redirect → http://localhost:3000  (redirects to HTTPS)
+```
+
+Open **https://localhost:3443**. On first visit click **Advanced → Proceed to localhost** to accept the self-signed certificate.
+
+**RPi5 Nodes** (or simulation on host):
 ```bash
-# Generate test audio
-python test_audio.py
+# On each RPi
+python -m impulsive_sound_detection.main live \
+    --mqtt --broker-host 192.168.1.100 --node-id node_1
 
-# Simulate a live node stream
+# Or simulate locally for testing
 python simulate_live.py --wav sine.wav --threshold-multiplier 1.5 \
     --mqtt --broker-host 127.0.0.1 --node-id node_sim --loop
 ```
 
-### RPi5 Node — Live Microphone
-```bash
-python -m impulsive_sound_detection.main live \
-    --mqtt --broker-host 192.168.1.100 \
-    --node-id node_1 \
-    --threshold-multiplier 2.0
-```
+---
+
+## Dashboard Overview
+
+| Tab | Purpose |
+|-----|---------|
+| **Live Feed** | Real-time stats, auto-scaling RMS chart, gauge, event feed, node summary, correlated events |
+| **History** | Filterable, sortable, paginated event log with CSV export |
+| **Query Lab** | Read-only SQL editor with preset queries and CSV export |
+| **Maintenance** | Node discovery, registration, editing, diagnostics (requires admin login) |
+
+**Admin login:** When you first open the Maintenance or Query Lab tab you will be prompted for the admin password. Enter the plaintext password you hashed during setup. It is verified via bcrypt server-side — never stored. The session persists in `sessionStorage` until the browser tab is closed.
 
 ---
 
 ## Database Schema
 
-**`detection_events`** — every audio detection event
+**`detection_events`**
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER PK | Auto-increment |
 | event_uuid | TEXT | UUID per detection |
 | node_id | TEXT | Source RPi node |
-| label | TEXT | YAMNet label (e.g. "Gunshot, gunfire") |
-| confidence | REAL | 0.0–1.0 classifier confidence |
-| is_suspicious | INTEGER | 1 if label matches suspicious set |
+| label | TEXT | Classifier label (e.g. "Gunshot, gunfire") |
+| confidence | REAL | 0.0–1.0 |
+| is_suspicious | INTEGER | 1 if label matches SUSPICIOUS_LABELS |
 | severity | TEXT | LOW / MEDIUM / HIGH |
 | timestamp_node | REAL | Unix time (stream-relative) |
-| wall_clock_time | REAL | Unix time (actual wall clock at trigger) |
-| received_at_host | REAL | Unix time when host subscriber received it |
-| onset_index | INTEGER | Sample index of the trigger onset |
+| wall_clock_time | REAL | Unix time at trigger |
+| received_at_host | REAL | Unix time when host received it |
+| onset_index | INTEGER | Sample index of trigger |
 | session_id | TEXT | Session identifier |
 | inserted_at | TEXT | SQLite insert timestamp |
 
-**`node_status`** — one row per registered RPi node
+**`node_status`**
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -283,7 +468,7 @@ python -m impulsive_sound_detection.main live \
 | enabled | INTEGER | 1 = active, 0 = decommissioned |
 | notes | TEXT | Admin notes |
 
-**`rms_frames`** — throttled RMS energy samples (≈5/sec per node)
+**`rms_frames`**
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -292,174 +477,508 @@ python -m impulsive_sound_detection.main live \
 | rms | REAL | Frame RMS energy |
 | baseline | REAL | Rolling 10s baseline |
 | threshold | REAL | Dynamic trigger threshold |
-| is_trigger | INTEGER | 1 if this frame caused a Stage 1 trigger |
+| is_trigger | INTEGER | 1 if this frame triggered Stage 1 |
 
-**`localization_results`** — Sound Localization team output (stub)
+**`localization_results`** — stub, pending Sound Localization team integration
 
 | Column | Type | Description |
 |--------|------|-------------|
 | received_at | REAL | Unix timestamp |
-| payload_json | TEXT | Raw JSON from localization module |
+| payload_json | TEXT | Raw JSON payload |
 
 ---
 
 ## REST API Reference
 
-### Public Routes (no authentication required)
+### Public Routes (no auth)
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| GET | `/api/events` | Latest detection events. `?limit=N&node=node_id` |
-| GET | `/api/stats` | Summary counters (total, suspicious, nodes online, avg confidence) |
-| GET | `/api/nodes` | Node list with per-node stats |
-| GET | `/api/rms` | Recent RMS frames for chart. `?node=node_id` |
-| GET | `/api/correlated` | Cross-node events within 2s (TDOA candidates) |
-| GET | `/api/localization` | Latest localization result (stub) |
-| GET | `/api/status` | DB mode (live/demo) and path |
-| GET | `/api/history` | Paginated, filterable event history. See params below |
-| POST | `/api/auth/verify` | Verify admin key. Body: `{"key":"..."}` |
+| GET | `/api/events` | Latest events. `?limit=N&node=id` |
+| GET | `/api/stats` | Summary counters |
+| GET | `/api/nodes` | Node list with stats |
+| GET | `/api/rms` | RMS frames. `?node=id` |
+| GET | `/api/correlated` | Cross-node events within 2s |
+| GET | `/api/localization` | Latest localization result |
+| GET | `/api/status` | DB mode and path |
+| GET | `/api/events/stream` | SSE persistent push connection |
+| GET | `/api/history` | Paginated event history (see params below) |
+| POST | `/api/auth/verify` | Verify password. Body: `{"key":"..."}` |
 
-**`/api/history` query parameters:**
+**`/api/history` params:** `page`, `per`, `sort` (id/node_id/label/confidence/severity/is_suspicious/inserted_at), `dir` (ASC/DESC), `node`, `label`, `severity`, `susp=1`, `from`, `to`
 
-| Param | Example | Description |
-|-------|---------|-------------|
-| page | `?page=2` | Page number (default 1) |
-| per | `?per=50` | Results per page (max 200, default 50) |
-| node | `?node=node_1` | Filter by node ID |
-| label | `?label=Gunshot` | Filter by label substring |
-| severity | `?severity=HIGH` | Filter by severity (HIGH/MEDIUM/LOW) |
-| susp | `?susp=1` | Suspicious events only |
-| from | `?from=2026-05-01 00:00:00` | From date (inserted_at) |
-| to | `?to=2026-05-07 23:59:59` | To date (inserted_at) |
-
-### Admin Routes (require `X-Admin-Key` header)
-
-All admin routes require the HTTP header:
-```
-X-Admin-Key: <your ADMIN_API_KEY>
-```
+### Admin Routes (require `X-Admin-Key: <password>` header)
 
 | Method | Route | Description |
 |--------|-------|-------------|
-| POST | `/api/admin/query` | Run a read-only SELECT query. Body: `{"sql":"..."}` |
-| GET | `/api/admin/nodes` | All nodes with admin fields (enabled, notes) |
-| GET | `/api/admin/nodes/discovered` | Nodes detected in events but not registered |
-| POST | `/api/admin/nodes` | Register a new node. Body: `{"node_id","location","notes"}` |
+| POST | `/api/admin/query` | Read-only SQL. Body: `{"sql":"SELECT ..."}` |
+| GET | `/api/admin/nodes` | All nodes with admin fields |
+| GET | `/api/admin/nodes/discovered` | Nodes seen in events but not registered |
+| POST | `/api/admin/nodes` | Register node. Body: `{"node_id","location","notes"}` |
 | PUT | `/api/admin/nodes/:id` | Update node. Body: `{"location","enabled","notes"}` |
-| DELETE | `/api/admin/nodes/:id` | Remove a node record (preserves events) |
-| POST | `/api/admin/nodes/:id/ping` | Mark node last_seen = now |
-| POST | `/api/admin/nodes/:id/clear` | Delete all events + RMS frames for a node |
+| DELETE | `/api/admin/nodes/:id` | Remove node record |
+| POST | `/api/admin/nodes/:id/ping` | Update last_seen to now |
+| POST | `/api/admin/nodes/:id/clear` | Delete all events + RMS for a node |
 
 ---
 
-## Authentication
+## Authentication & Security
 
-Admin routes are protected by API key authentication. The key is set in `.env` as `ADMIN_API_KEY` and is never exposed in source code or committed to git.
+**Bcrypt password hashing:**
+- Admin password is hashed with bcrypt cost factor 12 (~250ms per verify)
+- Only the hash is stored in `ADMIN_PASSWORD_HASH` — the plaintext password is never persisted anywhere
+- `bcrypt.compare()` runs on every admin request server-side
+- The ~250ms delay is intentional — it defeats brute-force attacks even if the hash is exposed
 
-**How it works:**
-1. User clicks the **Maintenance** or **Query Lab** tab for the first time
-2. Dashboard prompts for the admin key via a modal dialog
-3. Key is sent to `POST /api/auth/verify` — server returns 200 or 401
-4. On success, key is stored in `sessionStorage` (cleared when browser tab closes)
-5. All subsequent admin API calls include `X-Admin-Key: <key>` in the request header
-6. Server middleware validates the header on every `/api/admin/*` route
+**HTTPS:**
+- Self-signed TLS certificate covers localhost and LAN IP
+- All traffic on port 3000 is redirected to HTTPS on port 3443 via `301`
+- The `X-Admin-Key` header (containing the password) is encrypted in transit
 
-**Security notes:**
-- The key is stored in `sessionStorage`, not `localStorage` — it does not persist across sessions
-- HTTPS should be used in production deployment to prevent key interception
-- The default key `isd-admin-changeme` triggers a server warning on startup
-- This is API-key authentication, appropriate for an IoT infrastructure dashboard used by network administrators
+**Query safety:**
+- Query Lab only permits `SELECT` / `WITH` — write keywords blocked by word-boundary regex
+- `ORDER BY` columns validated against a hardcoded whitelist
+- Filter values escaped to prevent SQL injection
 
 ---
 
-## Deployment
+## Local Test Cases
 
-### Local (Docker)
+Run these on the host machine only. Terminals 2 and 3 must be running.
 
-```bash
-cd impulsive_sound_detection/dashboard_server
-docker build -t isd-dashboard .
-docker compose up
+### LT-1 · Demo mode fallback
+
+```powershell
+Rename-Item logs\host.db logs\host.db.bak
+docker rm -f isd-dashboard && docker compose up --build
 ```
 
-The `docker-compose.yml` mounts the host `logs/` directory into the container at `/data` so the server can read `host.db` written by `host_subscriber.py`.
-
-### Environment Variables in Docker
-
-Environment variables are injected via `docker-compose.yml` and do not come from the `.env` file inside the container (`.env` is excluded by `.dockerignore`):
-
-```yaml
-environment:
-  - ISD_DB_PATH=/data/host.db
-  - ADMIN_API_KEY=your-secret-key-here
-  - PORT=3000
+Dashboard should show **DEMO MODE** badge and simulated events every 4 seconds. Restore when done:
+```powershell
+Rename-Item logs\host.db.bak logs\host.db
+docker rm -f isd-dashboard && docker compose up
 ```
 
 ---
 
-## Testing
+### LT-2 · Synthetic audio pipeline test
 
-### Generate test audio files
-```bash
-python test_audio.py
-# Creates spike.wav, sine.wav, sawtooth.wav
+```powershell
+python test_audio.py                                        # generates spike/sine/sawtooth WAVs
+python -m impulsive_sound_detection.main detect --wav spike.wav   # expect is_suspicious=False
+python -m impulsive_sound_detection.main detect --wav sine.wav    # expect label=background
 ```
 
-### Run a complete end-to-end test
+---
 
-With Mosquitto running and `host_subscriber.py` active:
+### LT-3 · MQTT publish → database write
 
-```bash
-# Publish a fake detection over MQTT
+```powershell
+python test_mqtt.py     # publishes a fake suspicious detection
+python check_db.py      # should show new row with is_suspicious=1
+```
+
+---
+
+### LT-4 · Simulate live stream
+
+```powershell
+python simulate_live.py --wav sine.wav --threshold-multiplier 1.5 `
+    --mqtt --broker-host 127.0.0.1 --node-id node_sim --loop
+```
+
+Watch the Live Feed — events appear for `node_sim`. RMS chart Y-axis scales dynamically.
+
+---
+
+### LT-5 · Authentication
+
+```powershell
+# 401 — no key
+curl -k https://localhost:3443/api/admin/nodes
+
+# 401 — wrong password
+curl -k https://localhost:3443/api/admin/nodes -H "X-Admin-Key: wrongpassword"
+
+# 200 — correct password
+curl -k https://localhost:3443/api/admin/nodes -H "X-Admin-Key: your-actual-password"
+
+# Verify endpoint
+curl -k -X POST https://localhost:3443/api/auth/verify `
+     -H "Content-Type: application/json" -d '{"key":"your-actual-password"}'
+# Expected: {"ok":true}
+```
+
+---
+
+### LT-6 · HTTPS redirect
+
+```powershell
+curl -v http://localhost:3000/
+# Look for: Location: https://localhost:3443/
+```
+
+---
+
+### LT-7 · Query Lab keyword blocking
+
+| Query | Expected result |
+|-------|----------------|
+| `SELECT * FROM detection_events LIMIT 5` | Returns rows |
+| `SELECT inserted_at FROM detection_events LIMIT 5` | Returns rows (inserted_at is not blocked) |
+| `DELETE FROM detection_events` | Blocked: "Only SELECT / WITH queries are permitted" |
+| `DROP TABLE node_status` | Blocked |
+| `WITH x AS (SELECT 1) SELECT * FROM x` | Returns 1 row |
+| `SELECT * FROM nonexistent_table` | SQLite error shown, no crash |
+
+---
+
+### LT-8 · History sort and filter
+
+1. Click **CONF** header → sorts DESC (highest first), arrow shows ↓
+2. Click **CONF** again → flips to ASC, arrow shows ↑
+3. Click **SEVERITY** → sorts HIGH → MEDIUM → LOW (logical order, not alphabetical)
+4. Apply **SUSPICIOUS ONLY** filter + **CONF DESC** sort simultaneously
+5. Click **NEXT** page → sort preserved
+6. Click **CSV ↓** → downloaded file matches current sort + filter
+7. Click **CLEAR** → filters and sort reset to ID DESC
+
+---
+
+### LT-9 · Node registration edge cases
+
+In Maintenance tab (after login):
+
+| Action | Expected |
+|--------|----------|
+| Add node with blank node_id | "Node ID is required" toast |
+| Add node with id that already exists | "Node already exists" error toast |
+| Remove a node, restart Docker | Events still exist in History (only registration removed) |
+| Disable a node via edit modal | Node appears with reduced opacity in sidebar |
+
+---
+
+### LT-10 · SSE connection
+
+1. Open DevTools → Network → filter by `stream`
+2. `GET /api/events/stream` should show as **pending** (persistent connection)
+3. Run `python test_mqtt.py` → nav badge flashes **⚠ ALERT** within 1 second
+4. Kill Terminal 2 (host_subscriber) → SSE disconnects, polling continues every 4s
+5. Restart Terminal 2 → SSE reconnects automatically (exponential backoff)
+
+---
+
+## Integrated Test Cases
+
+Run with at least one RPi5 node active on the LAN.
+
+### IT-1 · End-to-end detection
+
+1. Start broker, host_subscriber, Docker, and RPi node pipeline
+2. Make a loud sudden noise near the RPi microphone
+3. Within ≤1 second: dashboard nav badge flashes **⚠ ALERT**
+4. Event appears at top of Live Feed immediately (SSE push, not 4s poll)
+5. Terminal 2 logs the detection with correct node_id, label, severity
+
+---
+
+### IT-2 · Multi-node correlated event
+
+1. Two RPi nodes running (node_1, node_2)
+2. Make a noise loud enough for both to detect
+3. Both trigger within 2 seconds of each other
+4. Correlated Events panel shows both node IDs with Δt ≤ 2.0s
+
+---
+
+### IT-3 · New node auto-discovery
+
+1. Configure a new RPi with a node_id not yet registered (e.g. `node_5`)
+2. Start its pipeline — it publishes one detection
+3. Open Maintenance tab → Node Discovery → click ↺ REFRESH
+4. `node_5` appears with event count and last seen time
+5. Click **REGISTER** → node moves to Registered Nodes list
+6. Restart Docker → node_5 still registered (persisted to host.db)
+
+---
+
+### IT-4 · Node offline watchdog
+
+1. RPi running and showing **● ON** in sidebar
+2. Kill the RPi pipeline (`Ctrl+C` or `sudo systemctl stop isd-node`)
+3. Wait ~60 seconds
+4. Sidebar updates to **○ OFF** for that node
+
+---
+
+### IT-5 · Multiple concurrent browser tabs (SSE)
+
+1. Open dashboard in 3 browser tabs
+2. Docker logs show `[SSE] Client connected (total: 3)`
+3. Run `python test_mqtt.py` → all 3 tabs flash alert simultaneously
+4. Close one tab → Docker logs show `[SSE] Client disconnected (total: 2)`
+
+---
+
+## Troubleshooting
+
+### Dashboard shows DEMO MODE instead of LIVE DATA
+
+`host.db` is not found at the path in `ISD_DB_PATH`, or the Docker volume mount path is wrong.
+
+```powershell
+# Verify the file exists
+Test-Path C:\Github\ImpulsiveSoundDetection\logs\host.db
+
+# If it doesn't exist: start host_subscriber then run test_mqtt.py to create it
 python test_mqtt.py
+```
 
-# Verify it hit the database
-python check_db.py
+Also verify the left side of the volume mount in `docker-compose.yml` matches the actual Windows path to your `logs/` folder.
 
-# Stream a WAV through the full pipeline
-python simulate_live.py --wav sine.wav --threshold-multiplier 1.5 \
+---
+
+### Docker shows HTTP only — no HTTPS
+
+Cert files not mounted or env vars missing.
+
+```powershell
+dir .\certs\                              # must show server.key and server.crt
+Select-String "CERT_PATH" .\docker-compose.yml    # must be uncommented
+
+docker rm -f isd-dashboard && docker compose up --build
+```
+
+---
+
+### Admin login always fails
+
+Hash in `docker-compose.yml` is wrong, the placeholder, or miscopied.
+
+```powershell
+# Regenerate the hash
+node -e "require('bcrypt').hash('your-password', 12).then(console.log)"
+
+# Paste into docker-compose.yml — must start with $2b$12$
+# Rebuild after updating
+docker rm -f isd-dashboard && docker compose up --build
+```
+
+Bcrypt is case-sensitive. Verify you type the exact same password you hashed.
+
+---
+
+### `ns.enabled` column error in Docker logs
+
+Stale `host.db` from before the schema migration. Handled automatically on startup by `ensureAdminColumns()`. If it persists:
+
+```powershell
+# Nuclear option — delete and recreate
+Remove-Item logs\host.db
+# Restart host_subscriber — it recreates the schema automatically
+```
+
+---
+
+### Nodes not appearing in sidebar or History dropdown
+
+Usually caused by the column error above. Fix that first, then hard-refresh (`Ctrl+Shift+R`).
+
+---
+
+### MQTT events not reaching host_subscriber
+
+```powershell
+# Test the broker is reachable and passing messages
+& "C:\Program Files\mosquitto\mosquitto_sub.exe" -h 127.0.0.1 -t "isd/#" -v
+# Then in another terminal:
+& "C:\Program Files\mosquitto\mosquitto_pub.exe" -h 127.0.0.1 -t "isd/test" -m "hello"
+# mosquitto_sub should print the message
+
+# If nothing appears: broker is not running
+net start mosquitto
+```
+
+---
+
+### RPi cannot connect to broker
+
+```bash
+# From the RPi
+ping 192.168.1.100                          # verify host is reachable
+mosquitto_pub -h 192.168.1.100 -t test -m hello   # test MQTT
+```
+
+If ping works but MQTT doesn't: Mosquitto isn't accepting remote connections. Add `listener 1883` and `allow_anonymous true` to `mosquitto.conf` on the host then restart.
+
+---
+
+### bcrypt module not found
+
+```powershell
+cd impulsive_sound_detection\dashboard_server
+npm install bcrypt --save
+```
+
+If compilation fails (node-gyp error), use the pure-JavaScript alternative:
+```powershell
+npm install bcryptjs --save
+# Change require('bcrypt') to require('bcryptjs') in index.js — API is identical
+```
+
+---
+
+### simulate_live.py doesn't trigger any detections
+
+The signal level is too low for the threshold multiplier. Try:
+
+```powershell
+python simulate_live.py --wav spike.wav --threshold-multiplier 0.5 `
     --mqtt --broker-host 127.0.0.1 --node-id node_sim
 ```
 
-### Test admin API authentication
-```bash
-# Should return 401
-curl -X GET http://localhost:3000/api/admin/nodes
+Lower multiplier = more sensitive. Default is 3.0; `spike.wav` triggers reliably at 1.5.
 
-# Should return node list
-curl -X GET http://localhost:3000/api/admin/nodes \
-     -H "X-Admin-Key: your-secret-key-here"
+---
+
+## Scalability — Adding New Nodes
+
+The system requires **no changes** to the host, broker, or dashboard code when new nodes are added.
+
+### Physical setup
+
+1. Follow [Initial Setup — RPi5 Node](#initial-setup--rpi5-node) on the new device
+2. Set a unique `NODE_ID` in `config.py`
+3. Set `MQTT_BROKER_HOST` to the host's LAN IP
+4. Start the pipeline
+
+### Dashboard registration
+
+Once the node publishes its first event, it auto-appears in **Maintenance → Node Discovery**. Click **REGISTER** to add a location and notes. It immediately appears in the sidebar, filter dropdowns, and diagnostics selector.
+
+**Pre-register before the RPi arrives:**
+
+1. Open Maintenance → Add Node Manually
+2. Enter the `NODE_ID` exactly as it will appear in `config.py`
+3. Set location and any notes
+4. Click **+ REGISTER NODE**
+
+The dashboard will already have the record when the RPi first comes online.
+
+### Broker scaling
+
+For 10+ nodes add to `mosquitto.conf`:
+
 ```
+max_connections 500
+max_queued_messages 1000
+persistence true
+persistence_location /var/lib/mosquitto/
+```
+
+### Database scaling
+
+SQLite handles up to ~20 nodes at typical detection rates. For larger deployments, migrate to PostgreSQL — only `host_subscriber.py` and `index.js` need changing; the schema and all queries stay identical.
+
+---
+
+## Scalability — Admin Account Management
+
+The system currently uses a **single shared admin password**, appropriate for a small team on a LAN.
+
+### Changing the admin password
+
+```powershell
+cd impulsive_sound_detection\dashboard_server
+
+node -e "require('bcrypt').hash('new-password', 12).then(console.log)"
+# Paste new hash into docker-compose.yml → ADMIN_PASSWORD_HASH
+
+docker rm -f isd-dashboard && docker compose up --build
+```
+
+All active admin sessions are invalidated immediately on rebuild — users will be re-prompted on their next admin action.
+
+### Renewing the TLS certificate (annually)
+
+Self-signed certs expire after 365 days. Renew with the same command:
+
+```powershell
+& "C:\Program Files\Git\usr\bin\openssl.exe" req -x509 -nodes -newkey rsa:2048 `
+  -keyout .\certs\server.key `
+  -out    .\certs\server.crt `
+  -days   365 `
+  -subj   "/C=US/ST=MD/L=College Park/O=ISD System/CN=localhost" `
+  -addext "subjectAltName=IP:127.0.0.1,IP:192.168.1.100,DNS:localhost"
+
+docker rm -f isd-dashboard && docker compose up --build
+```
+
+### Future: per-user admin accounts
+
+The architecture supports upgrading to multiple named admins with minimal changes:
+
+1. Add an `admin_users` table to `host.db`:
+   ```sql
+   CREATE TABLE admin_users (
+     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+     username   TEXT UNIQUE NOT NULL,
+     hash       TEXT NOT NULL,
+     created_at TEXT DEFAULT (datetime('now'))
+   );
+   ```
+
+2. Update `requireAdmin` to look up the hash by username:
+   ```javascript
+   const user = get('SELECT hash FROM admin_users WHERE username=?', [username]);
+   const match = user && await bcrypt.compare(password, user.hash);
+   ```
+
+3. Add routes: `POST /api/admin/users` (create), `DELETE /api/admin/users/:name` (remove), `POST /api/admin/users/:name/password` (change)
+
+4. Update the login modal to include a username field alongside the password field
+
+5. Optionally add JWT tokens to cache authentication and avoid bcrypt on every request
+
+---
+
+## Limitations & Future Work
+
+| Limitation | Impact | Path Forward |
+|------------|--------|-------------|
+| Single shared admin password | All admins use same credential | Per-user accounts (see above) |
+| Self-signed TLS certificate | Browser warning on first visit | CA-signed cert via Let's Encrypt (requires public domain) |
+| CNN domain gap | EfficientNetB0 F1 drops on real audio vs synthetic test set | Fine-tune on ReaLISED dataset |
+| Sound Localization stub | TDOA panel shows no live data | Awaiting Sound Localization team MQTT output on `isd/localization/result` |
+| sql.js write-back | `db.export()` briefly blocks Node.js event loop on admin writes | Migrate to `better-sqlite3` native binding |
+| Windows microphone | sounddevice could not access mic on Windows dev machine | Use RPi5 hardware; WAV simulation used for all local testing |
+| SQLite at scale | May slow under 20+ nodes at high publish rates | Migrate to PostgreSQL |
 
 ---
 
 ## Technologies Used
 
-| Layer | Technology |
-|-------|-----------|
-| Frontend | HTML5, CSS3, JavaScript (ES2022), Chart.js |
-| Backend | Node.js 20, Express.js 4 |
-| Database | SQLite (via sql.js in server, via sqlite3 in Python) |
-| ML | TensorFlow 2, TensorFlow Hub (YAMNet), EfficientNetB0 |
-| Audio | librosa, sounddevice, soundfile, audiomentations |
-| Messaging | MQTT (Mosquitto broker, paho-mqtt client) |
-| Deployment | Docker, docker-compose |
-| Auth | API key (X-Admin-Key header, sessionStorage) |
-| Version Control | Git / GitHub |
+| Layer | Technology | Version |
+|-------|-----------|---------|
+| Frontend | HTML5, CSS3, JavaScript ES2022 | — |
+| Charts | Chart.js | 4.4.0 |
+| Backend | Node.js + Express.js | 20 / 4.x |
+| Database (server) | SQLite via sql.js | 1.12.x |
+| Database (Python) | SQLite via stdlib sqlite3 | — |
+| Authentication | bcrypt (cost factor 12) | 5.1.x |
+| TLS | OpenSSL self-signed + Node.js https module | 3.x |
+| ML | TensorFlow + TensorFlow Hub (YAMNet) | 2.x |
+| ML (CNN) | EfficientNetB0 via Keras | 2.x |
+| Audio | librosa, sounddevice, soundfile, audiomentations | — |
+| Messaging | MQTT (Mosquitto broker, paho-mqtt client) | 2.x |
+| Containerization | Docker + docker-compose | Latest |
+| Real-time push | Server-Sent Events (SSE) | native |
+| Version Control | Git / GitHub | — |
 
 ---
 
-## Limitations and Future Work
+## AI Tool Disclosure
 
-- **Authentication** — API key auth is appropriate for a LAN IoT dashboard but does not support multiple users with individual passwords. A full JWT/session system would be needed for public deployment.
-- **HTTPS** — currently served over HTTP. Production deployment should use a reverse proxy (nginx) with TLS.
-- **Sound Localization** — the TDOA localization module is stubbed out pending integration with the Sound Localization team.
-- **CNN domain gap** — the EfficientNetB0 classifier achieves 98.8% F1 on synthetic spectrograms but shows performance degradation on real-world audio. Fine-tuning on real gunshot recordings is the next ML milestone.
-- **RPi microphone** — MEMS microphone input on Windows dev machine was not accessible through sounddevice; WAV simulation was used for local testing.
+This project was developed with assistance from **Claude** (Anthropic) for code generation, architecture design, debugging, and documentation. All AI-generated code was reviewed, understood, tested, and integrated by the team. The team remains fully responsible for the correctness, design, and originality of the system.
 
----
-
-## License
-
-Code in `impulsive_sound_detection/` is released under MIT. 
-Dataset files carry their own licenses — see `Gunshot Audio Spectrogram Dataset for Binary Class/README.md`.
+Areas where AI assistance was used: Express.js server architecture, REST API design, SSE push implementation, bcrypt authentication middleware, HTTPS/TLS configuration, frontend tab navigation and Chart.js integration, SQL query construction and validation, and this README.

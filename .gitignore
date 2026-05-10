@@ -22,6 +22,7 @@ build/
 .env.*
 *.env
 impulsive_sound_detection/dashboard_server/.env
+impulsive_sound_detection/dashboard_server/certs/
 
 # ── Logs & output ─────────────────────────────────────────────────────
 *.log
@@ -73,3 +74,4 @@ desktop.ini
 .vscode/
 *.suo
 *.user
+

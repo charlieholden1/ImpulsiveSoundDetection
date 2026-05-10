@@ -3,11 +3,21 @@ services:
     build: .
     container_name: isd-dashboard
     ports:
-      - "3000:3000"
+      - "3000:3000"    # HTTP (redirects to HTTPS when TLS configured)
+      - "3443:3443"    # HTTPS
     volumes:
       - C:\Github\ImpulsiveSoundDetection\logs:/data
+      # Uncomment after running generate-cert.ps1:
+      - .\certs:/certs:ro
     environment:
       - ISD_DB_PATH=/data/host.db
-      - ADMIN_API_KEY=1382efe20e3024c1382ea79775007d47ea5ecbdbbc1f1764a053acc36ba0df81
+      # bcrypt hash of your admin password.
+      # Generate with: node -e "require('bcrypt').hash('yourpassword',12).then(console.log)"
+      # Then paste the hash (starting with $2b$) here.
+      - ADMIN_PASSWORD_HASH=$2b$12$1Vz9UvepzOjmgLtcoNCRxudsTUI1VtAXHkfQckwcEfTRARYBC4GoK
       - PORT=3000
+      - HTTPS_PORT=3443
+      # Uncomment after running generate-cert.ps1:
+      - CERT_PATH=/certs/server.crt
+      - KEY_PATH=/certs/server.key
     restart: unless-stopped

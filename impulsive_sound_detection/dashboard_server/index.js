@@ -7,8 +7,17 @@
  * Authentication
  * ──────────────
  * Public routes  (read-only data)  : no auth required
- * Admin routes   /api/admin/*      : require X-Admin-Key header matching
- *                                    the ADMIN_API_KEY environment variable
+ * Admin routes   /api/admin/*      : require X-Admin-Key header whose value
+ *                                    is verified against a bcrypt hash stored
+ *                                    in ADMIN_PASSWORD_HASH env var.
+ *                                    The plaintext password is NEVER stored.
+ *
+ * HTTPS
+ * ─────
+ * When CERT_PATH and KEY_PATH env vars point to a TLS certificate and private
+ * key the server starts an https.Server on HTTPS_PORT (default 3443).
+ * A plain HTTP server still starts on PORT and redirects all traffic to HTTPS.
+ * For local/LAN deployment a self-signed certificate is sufficient.
  *
  * API surface:
  *   GET  /api/events                    – detection event feed
@@ -27,16 +36,19 @@
  *   DELETE /api/admin/nodes/:id         – remove a node record           [AUTH]
  *   POST /api/admin/nodes/:id/ping      – mark last_seen=now             [AUTH]
  *   POST /api/admin/nodes/:id/clear     – delete all events for a node   [AUTH]
- *   POST /api/auth/verify               – verify API key (returns ok/fail)
+ *   POST /api/auth/verify               – verify password (bcrypt)
  */
 
-const express = require('express');
-const initSql = require('sql.js');
-const cors    = require('cors');
-const path    = require('path');
-const fs      = require('fs');
+const express  = require('express');
+const initSql  = require('sql.js');
+const cors     = require('cors');
+const path     = require('path');
+const fs       = require('fs');
+const http     = require('http');
+const https    = require('https');
+const bcrypt   = require('bcrypt');
 
-// Load .env file if present (local dev). In Docker the values come from
+// Load .env file if present (local dev). In Docker env vars come from
 // the environment block in docker-compose.yml instead.
 try { require('dotenv').config(); } catch(_) { /* dotenv optional */ }
 
@@ -46,13 +58,23 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Config ─────────────────────────────────────────────────────────────
-const HOST_DB_PATH     = process.env.ISD_DB_PATH   || 'C:\\ImpulsiveSoundDetection\\host.db';
-const ADMIN_API_KEY    = process.env.ADMIN_API_KEY  || 'isd-admin-changeme';
-const PORT             = parseInt(process.env.PORT  || '3000', 10);
-const POLL_INTERVAL_MS = 2000;
+const HOST_DB_PATH         = process.env.ISD_DB_PATH            || 'C:\\ImpulsiveSoundDetection\\host.db';
+const ADMIN_PASSWORD_HASH  = process.env.ADMIN_PASSWORD_HASH     || '';
+const PORT                 = parseInt(process.env.PORT            || '3000',  10);
+const HTTPS_PORT           = parseInt(process.env.HTTPS_PORT      || '3443',  10);
+const CERT_PATH            = process.env.CERT_PATH               || '';
+const KEY_PATH             = process.env.KEY_PATH                || '';
+const POLL_INTERVAL_MS     = 2000;
 
-if (ADMIN_API_KEY === 'isd-admin-changeme') {
-  console.warn('[WARN] ADMIN_API_KEY is using the default value. Set it in .env for production.');
+// Warn if no password hash is configured
+if (!ADMIN_PASSWORD_HASH) {
+  console.warn('[WARN] ADMIN_PASSWORD_HASH is not set. Admin routes will reject all requests.');
+  console.warn('[WARN] Generate a hash with: node -e "require(\'bcrypt\').hash(\'yourpassword\',12).then(console.log)"');
+}
+
+// Warn if TLS is not configured
+if (!CERT_PATH || !KEY_PATH) {
+  console.warn('[WARN] CERT_PATH / KEY_PATH not set – running HTTP only. Set these env vars for HTTPS.');
 }
 
 let db;
@@ -274,24 +296,46 @@ app.post('/api/internal/notify', (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 // AUTHENTICATION MIDDLEWARE
 // Admin routes require the request header:
-//   X-Admin-Key: <ADMIN_API_KEY value from .env>
-// The dashboard frontend stores the key in sessionStorage after login.
+//   X-Admin-Key: <plaintext password>
+// The middleware verifies it against the bcrypt hash stored in
+// ADMIN_PASSWORD_HASH. The plaintext password is never stored anywhere.
+//
+// Bcrypt is intentionally slow (cost factor 12 = ~250ms per check).
+// This prevents brute-force attacks even if the hash is exposed.
 // ══════════════════════════════════════════════════════════════════════
-function requireAdmin(req, res, next) {
+async function requireAdmin(req, res, next) {
   const provided = req.headers['x-admin-key'] || '';
-  if (!provided || provided !== ADMIN_API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized – valid X-Admin-Key required.' });
+  if (!provided || !ADMIN_PASSWORD_HASH) {
+    return res.status(401).json({ error: 'Unauthorized – admin password required.' });
   }
-  next();
+  try {
+    const match = await bcrypt.compare(provided, ADMIN_PASSWORD_HASH);
+    if (!match) {
+      return res.status(401).json({ error: 'Unauthorized – incorrect password.' });
+    }
+    next();
+  } catch(e) {
+    console.error('[Auth] bcrypt error:', e.message);
+    return res.status(500).json({ error: 'Authentication error.' });
+  }
 }
 
-// Key verification endpoint – used by the frontend login prompt
-app.post('/api/auth/verify', (req, res) => {
+// Password verification endpoint – used by the frontend login prompt.
+// Returns 200 {ok:true} on success, 401 on failure.
+app.post('/api/auth/verify', async (req, res) => {
   const { key } = req.body || {};
-  if (key === ADMIN_API_KEY) {
-    res.json({ ok: true });
-  } else {
-    res.status(401).json({ ok: false, error: 'Invalid key' });
+  if (!key || !ADMIN_PASSWORD_HASH) {
+    return res.status(401).json({ ok: false, error: 'Invalid credentials' });
+  }
+  try {
+    const match = await bcrypt.compare(key, ADMIN_PASSWORD_HASH);
+    if (match) {
+      res.json({ ok: true });
+    } else {
+      res.status(401).json({ ok: false, error: 'Invalid credentials' });
+    }
+  } catch(e) {
+    res.status(500).json({ ok: false, error: 'Authentication error' });
   }
 });
 
@@ -612,12 +656,40 @@ async function main() {
     }, 4000);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ISD Dashboard → http://localhost:${PORT}`);
-    console.log(`Database mode : ${dbMode.toUpperCase()}`);
-    if (dbMode === 'live') console.log(`Reading from  : ${HOST_DB_PATH}`);
-    else console.log(`Demo mode – run host_subscriber.py to switch to live data`);
-  });
+  // ── Start servers ────────────────────────────────────────────────────
+  if (CERT_PATH && KEY_PATH && fs.existsSync(CERT_PATH) && fs.existsSync(KEY_PATH)) {
+    // HTTPS mode: load TLS cert + key and start an HTTPS server
+    const tlsOptions = {
+      cert: fs.readFileSync(CERT_PATH),
+      key:  fs.readFileSync(KEY_PATH),
+    };
+    https.createServer(tlsOptions, app).listen(HTTPS_PORT, '0.0.0.0', () => {
+      console.log(`ISD Dashboard → https://localhost:${HTTPS_PORT}  (HTTPS)`);
+      console.log(`Database mode : ${dbMode.toUpperCase()}`);
+      if (dbMode === 'live') console.log(`Reading from  : ${HOST_DB_PATH}`);
+    });
+
+    // HTTP → HTTPS redirect server on PORT
+    http.createServer((req, res) => {
+      const host = (req.headers.host || 'localhost').split(':')[0];
+      res.writeHead(301, { Location: `https://${host}:${HTTPS_PORT}${req.url}` });
+      res.end();
+    }).listen(PORT, '0.0.0.0', () => {
+      console.log(`HTTP redirect → http://localhost:${PORT}  (redirects to HTTPS)`);
+    });
+
+  } else {
+    // HTTP-only fallback
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`ISD Dashboard → http://localhost:${PORT}  (HTTP only)`);
+      console.log(`Database mode : ${dbMode.toUpperCase()}`);
+      if (dbMode === 'live') console.log(`Reading from  : ${HOST_DB_PATH}`);
+      else console.log(`Demo mode – run host_subscriber.py to switch to live data`);
+      if (!CERT_PATH || !KEY_PATH) {
+        console.log(`[TLS] Set CERT_PATH + KEY_PATH env vars to enable HTTPS`);
+      }
+    });
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

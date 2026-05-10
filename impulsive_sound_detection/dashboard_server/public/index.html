@@ -673,16 +673,16 @@
   <div class="modal" style="max-width:360px">
     <h4 style="color:var(--purple)">🔐 ADMIN LOGIN</h4>
     <p style="font-size:12px;color:var(--muted);line-height:1.6">
-      The Maintenance tab requires an admin API key.<br>
-      Enter the <code style="color:var(--cyan)">ADMIN_API_KEY</code> value from your <code style="color:var(--cyan)">.env</code> file.
+      The Maintenance tab requires admin authentication.<br>
+      Enter the admin password set in your <code style="color:var(--cyan)">docker-compose.yml</code>.
     </p>
     <div class="modal-row">
-      <label>API KEY</label>
-      <input id="loginKeyInput" type="password" class="form-input" placeholder="Enter admin key…"
+      <label>ADMIN PASSWORD</label>
+      <input id="loginKeyInput" type="password" class="form-input" placeholder="Enter admin password…"
              onkeydown="if(event.key==='Enter') submitLogin()">
     </div>
     <div id="loginError" style="font-family:var(--mono);font-size:10px;color:var(--red);display:none">
-      ⚠ Invalid key – try again
+      ⚠ Incorrect password – try again
     </div>
     <div class="modal-footer">
       <button class="btn btn-muted" onclick="cancelLogin()">CANCEL</button>
@@ -781,7 +781,19 @@ const rmsChart = new Chart(rmsCtx, {
                 titleColor:'#6a85a8', bodyColor:'#e2eaf5' }
     },
     scales:{
-      x:{ display:false },
+      x:{ display:true,
+          ticks:{
+            color:'#6a85a8',
+            font:{ family:"'Space Mono'", size:9 },
+            maxTicksLimit: 8,
+            maxRotation: 0,
+            callback: function(val) {
+              // val is the label string (HH:MM:SS) — return as-is
+              return this.getLabelForValue(val);
+            }
+          },
+          grid:{ color:'rgba(30,48,80,0.8)' }
+        },
       y:{
         min: 0,
         // No hard max — Chart.js will scale to the data
@@ -833,8 +845,11 @@ function setRmsData(rows) {
   // Apply dynamic Y max
   rmsChart.options.scales.y.suggestedMax = rmsYMax;
 
-  // Update labels from the first node's timestamps
-  rmsChart.data.labels = byNode[firstNode].map(r => r.ts.toFixed(0));
+  // Update labels from the first node's timestamps (Unix seconds → HH:MM:SS)
+  rmsChart.data.labels = byNode[firstNode].map(r => {
+    const d = new Date(r.ts * 1000);
+    return d.toLocaleTimeString('en-US', { hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit' });
+  });
 
   // Update each node's dataset
   Object.entries(byNode).forEach(([id, frames]) => {
