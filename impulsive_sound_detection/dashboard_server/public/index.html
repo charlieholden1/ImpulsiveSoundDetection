@@ -40,7 +40,8 @@
   .nav-time { font-family:var(--mono); font-size:11px; color:var(--muted); }
   .node-filter { background:var(--bg3); border:1px solid var(--border2); color:var(--text);
                  font-family:var(--sans); font-size:12px; padding:5px 10px; border-radius:4px;
-                 cursor:pointer; outline:none; }
+                 cursor:pointer; outline:none; position:relative; z-index:100; }
+  .node-filter option { background:var(--bg2); color:var(--text); }
 
   aside { grid-area:side; background:var(--bg2); border-right:1px solid var(--border);
           padding:20px 0; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
@@ -175,6 +176,11 @@
   .btn[disabled] { opacity:.4; cursor:not-allowed; }
   .pager { display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px; color:var(--muted); }
   .hist-table-wrap { overflow-x:auto; }
+  .sort-th { cursor:pointer; user-select:none; white-space:nowrap; }
+  .sort-th:hover { color:var(--cyan); }
+  .sort-th .sort-arrow { display:inline-block; margin-left:4px; opacity:.35; font-size:9px; }
+  .sort-th.active { color:var(--cyan); }
+  .sort-th.active .sort-arrow { opacity:1; }
   .sev-high { color:var(--red); } .sev-med { color:var(--amber); } .sev-low { color:var(--muted); }
 
   /* ── Query Lab ── */
@@ -442,9 +448,15 @@
 
         <div class="hist-table-wrap">
           <table>
-            <thead><tr>
-              <th>ID</th><th>NODE</th><th>LABEL</th><th>CONF</th>
-              <th>SEVERITY</th><th>SUSPICIOUS</th><th>TIMESTAMP</th><th>SESSION</th>
+            <thead><tr id="histThead">
+              <th class="sort-th" onclick="histSort('id')">ID<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('node_id')">NODE<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('label')">LABEL<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('confidence')">CONF<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('severity')">SEVERITY<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('is_suspicious')">SUSPICIOUS<span class="sort-arrow">↕</span></th>
+              <th class="sort-th" onclick="histSort('inserted_at')">TIMESTAMP<span class="sort-arrow">↕</span></th>
+              <th>SESSION</th>
             </tr></thead>
             <tbody id="histTable"></tbody>
           </table>
@@ -463,53 +475,91 @@
 
     <!-- ══ TAB: QUERY LAB ══ -->
     <div class="tab-view" id="tab-query">
-      <div class="panel">
-        <div class="panel-head"><span>QUERY LAB</span><span class="ph-badge">READ-ONLY</span></div>
-        <div class="panel-body query-wrap">
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:6px;letter-spacing:.1em">PRESET QUERIES</div>
-            <div class="presets" id="presets"></div>
+
+      <!-- Two-column top: editor left, schema right -->
+      <div style="display:grid;grid-template-columns:1fr 320px;gap:16px;align-items:start">
+
+        <div class="panel">
+          <div class="panel-head">
+            <span>QUERY LAB</span>
+            <span class="ph-badge">SELECT / WITH ONLY</span>
           </div>
-          <textarea class="sql-editor" id="sqlInput" spellcheck="false"
-            placeholder="SELECT * FROM detection_events WHERE is_suspicious = 1 ORDER BY id DESC LIMIT 20"></textarea>
-          <div style="display:flex;align-items:center;gap:10px">
-            <button class="btn btn-cyan" onclick="runQuery()">▶ RUN QUERY</button>
-            <button class="btn btn-muted" onclick="document.getElementById('sqlInput').value=''">CLEAR</button>
-            <span class="query-meta" id="queryMeta"></span>
+          <div class="panel-body query-wrap">
+            <div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:6px;letter-spacing:.1em">PRESETS — click to load</div>
+              <div class="presets" id="presets"></div>
+            </div>
+            <div style="position:relative">
+              <textarea class="sql-editor" id="sqlInput" spellcheck="false" rows="6"
+                placeholder="SELECT * FROM detection_events WHERE is_suspicious = 1 ORDER BY id DESC LIMIT 20"></textarea>
+              <div style="position:absolute;bottom:6px;right:8px;font-family:var(--mono);font-size:9px;color:var(--border2)">Ctrl+Enter to run</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-cyan" onclick="runQuery()">▶ RUN</button>
+              <button class="btn btn-muted" onclick="clearQuery()">✕ CLEAR</button>
+              <button class="btn btn-amber" id="copyBtn" style="display:none" onclick="copyQueryCSV()">CSV ↓</button>
+              <span class="query-meta" id="queryMeta"></span>
+            </div>
+            <div id="queryError" class="query-error" style="display:none"></div>
           </div>
-          <div id="queryError" style="display:none"></div>
-          <div class="query-result-wrap" id="queryResultWrap" style="display:none">
-            <table id="queryTable">
-              <thead id="queryHead"></thead>
-              <tbody id="queryBody"></tbody>
-            </table>
+        </div>
+
+        <!-- Schema reference sidebar -->
+        <div class="panel" style="position:sticky;top:0">
+          <div class="panel-head"><span>SCHEMA</span></div>
+          <div class="panel-body" style="display:flex;flex-direction:column;gap:14px">
+            <div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:6px;letter-spacing:.1em">detection_events</div>
+              <div style="font-family:var(--mono);font-size:10px;line-height:2">
+                <span style="color:var(--muted)">id</span> · <span style="color:var(--text)">node_id</span> · <span style="color:var(--text)">label</span><br>
+                <span style="color:var(--text)">confidence</span> · <span style="color:var(--text)">is_suspicious</span><br>
+                <span style="color:var(--text)">severity</span> · <span style="color:var(--muted)">timestamp_node</span><br>
+                <span style="color:var(--text)">wall_clock_time</span> · <span style="color:var(--muted)">received_at_host</span><br>
+                <span style="color:var(--muted)">onset_index</span> · <span style="color:var(--muted)">session_id</span><br>
+                <span style="color:var(--text)">inserted_at</span>
+              </div>
+            </div>
+            <div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:6px;letter-spacing:.1em">node_status</div>
+              <div style="font-family:var(--mono);font-size:10px;line-height:2">
+                <span style="color:var(--text)">node_id</span> · <span style="color:var(--text)">location</span><br>
+                <span style="color:var(--text)">status</span> · <span style="color:var(--muted)">last_seen</span><br>
+                <span style="color:var(--text)">enabled</span> · <span style="color:var(--text)">notes</span>
+              </div>
+            </div>
+            <div>
+              <div style="font-family:var(--mono);font-size:9px;color:var(--cyan);margin-bottom:6px;letter-spacing:.1em">rms_frames</div>
+              <div style="font-family:var(--mono);font-size:10px;line-height:2">
+                <span style="color:var(--text)">node_id</span> · <span style="color:var(--text)">ts</span><br>
+                <span style="color:var(--text)">rms</span> · <span style="color:var(--text)">baseline</span><br>
+                <span style="color:var(--text)">threshold</span> · <span style="color:var(--text)">is_trigger</span>
+              </div>
+            </div>
+            <div style="padding:8px;background:var(--bg3);border-radius:3px;font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.8">
+              💡 <span style="color:var(--amber)">Tips</span><br>
+              Use <code style="color:var(--cyan)">LIMIT</code> to cap results<br>
+              <code style="color:var(--cyan)">datetime(ts,'unixepoch')</code><br>
+              converts Unix timestamps<br>
+              <code style="color:var(--cyan)">Ctrl+Enter</code> runs query
+            </div>
           </div>
         </div>
       </div>
 
-      <div class="panel">
-        <div class="panel-head"><span>SCHEMA REFERENCE</span></div>
-        <div class="panel-body" style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;letter-spacing:.1em">detection_events</div>
-            <div style="font-family:var(--mono);font-size:10px;color:var(--border2);line-height:1.9">
-              id · event_uuid · node_id · label · confidence<br>
-              is_suspicious · severity · timestamp_node<br>
-              wall_clock_time · received_at_host<br>
-              onset_index · session_id · inserted_at
-            </div>
-          </div>
-          <div>
-            <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:8px;letter-spacing:.1em">node_status · rms_frames</div>
-            <div style="font-family:var(--mono);font-size:10px;color:var(--border2);line-height:1.9">
-              node_status: node_id · location · status<br>
-              last_seen · enabled · notes<br><br>
-              rms_frames: node_id · ts · rms<br>
-              baseline · threshold · is_trigger
-            </div>
-          </div>
+      <!-- Results panel (full width below) -->
+      <div class="panel" id="queryResultPanel" style="display:none">
+        <div class="panel-head">
+          <span>RESULTS</span>
+          <span class="ph-badge" id="queryResultMeta">0 rows</span>
+        </div>
+        <div class="query-result-wrap">
+          <table id="queryTable">
+            <thead id="queryHead"></thead>
+            <tbody id="queryBody"></tbody>
+          </table>
         </div>
       </div>
+
     </div><!-- end query -->
 
     <!-- ══ TAB: MAINTENANCE ══ -->
@@ -618,6 +668,29 @@
   </main>
 </div>
 
+<!-- Admin login modal -->
+<div class="modal-overlay" id="loginModal">
+  <div class="modal" style="max-width:360px">
+    <h4 style="color:var(--purple)">🔐 ADMIN LOGIN</h4>
+    <p style="font-size:12px;color:var(--muted);line-height:1.6">
+      The Maintenance tab requires an admin API key.<br>
+      Enter the <code style="color:var(--cyan)">ADMIN_API_KEY</code> value from your <code style="color:var(--cyan)">.env</code> file.
+    </p>
+    <div class="modal-row">
+      <label>API KEY</label>
+      <input id="loginKeyInput" type="password" class="form-input" placeholder="Enter admin key…"
+             onkeydown="if(event.key==='Enter') submitLogin()">
+    </div>
+    <div id="loginError" style="font-family:var(--mono);font-size:10px;color:var(--red);display:none">
+      ⚠ Invalid key – try again
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-muted" onclick="cancelLogin()">CANCEL</button>
+      <button class="btn btn-purple" onclick="submitLogin()">AUTHENTICATE</button>
+    </div>
+  </div>
+</div>
+
 <!-- Edit node modal -->
 <div class="modal-overlay" id="editModal">
   <div class="modal">
@@ -695,10 +768,12 @@ document.querySelectorAll('.side-item[data-tab]').forEach(el => {
 const rmsCtx = document.getElementById('rmsChart').getContext('2d');
 let threshMult = 3.0;
 const rmsDatasets = {};
+let rmsYMax = 0.1;  // tracks the rolling peak for dynamic Y scaling
+
 const rmsChart = new Chart(rmsCtx, {
   type:'line', data:{ labels:[], datasets:[] },
   options:{
-    responsive:true, maintainAspectRatio:false, animation:{duration:200},
+    responsive:true, maintainAspectRatio:false, animation:{duration:150},
     plugins:{
       legend:{ display:true, position:'top',
         labels:{ color:'#6a85a8', font:{family:"'Space Mono'",size:9}, boxWidth:12, padding:10 } },
@@ -707,8 +782,19 @@ const rmsChart = new Chart(rmsCtx, {
     },
     scales:{
       x:{ display:false },
-      y:{ min:0, max:1, grid:{color:'rgba(30,48,80,0.8)'},
-          ticks:{color:'#6a85a8', font:{family:"'Space Mono'",size:9}, maxTicksLimit:5} }
+      y:{
+        min: 0,
+        // No hard max — Chart.js will scale to the data
+        // suggestedMax updated dynamically in setRmsData()
+        suggestedMax: 0.1,
+        grid:{ color:'rgba(30,48,80,0.8)' },
+        ticks:{
+          color:'#6a85a8',
+          font:{ family:"'Space Mono'", size:9 },
+          maxTicksLimit: 5,
+          callback: v => v.toFixed(v < 0.01 ? 5 : v < 0.1 ? 4 : 3)
+        }
+      }
     }
   }
 });
@@ -724,25 +810,52 @@ function ensureNodeDataset(id) {
 
 function setRmsData(rows) {
   if (!rows.length) return;
-  const baseline = 0.06;
-  const thresh = Math.min(1, baseline * threshMult);
+
+  // Group by node
   const byNode = {};
   rows.forEach(r => { if(!byNode[r.node_id]) byNode[r.node_id]=[]; byNode[r.node_id].push(r); });
   const firstNode = Object.keys(byNode).sort()[0];
+
+  // Use actual baseline from data (average of all baseline values in the window)
+  const allBaselines = rows.map(r => r.baseline).filter(b => b > 0);
+  const avgBaseline  = allBaselines.length
+    ? allBaselines.reduce((a,b) => a+b, 0) / allBaselines.length
+    : 0.06;
+  const thresh = avgBaseline * threshMult;
+
+  // Find the actual peak RMS in this window
+  const peakRms = Math.max(...rows.map(r => r.rms), thresh, avgBaseline);
+
+  // Decay the rolling Y max slowly (keeps the scale stable between bursts)
+  // Snap up instantly on a new peak, decay down at 5% per update
+  rmsYMax = Math.max(peakRms * 1.25, rmsYMax * 0.95, avgBaseline * 2);
+
+  // Apply dynamic Y max
+  rmsChart.options.scales.y.suggestedMax = rmsYMax;
+
+  // Update labels from the first node's timestamps
   rmsChart.data.labels = byNode[firstNode].map(r => r.ts.toFixed(0));
+
+  // Update each node's dataset
   Object.entries(byNode).forEach(([id, frames]) => {
     ensureNodeDataset(id);
     rmsChart.data.datasets[rmsDatasets[id]].data = frames.map(r => r.rms);
   });
+
+  // Update or create threshold line using real baseline
   let tIdx = threshDatasetIdx();
   if (tIdx === -1) {
-    rmsChart.data.datasets.push({ label:'Threshold', data:[], borderColor:'rgba(255,61,90,0.6)',
-      borderWidth:1.5, borderDash:[4,4], pointRadius:0, backgroundColor:'transparent' });
+    rmsChart.data.datasets.push({
+      label:'Threshold', data:[], borderColor:'rgba(255,61,90,0.6)',
+      borderWidth:1.5, borderDash:[4,4], pointRadius:0, backgroundColor:'transparent'
+    });
     tIdx = rmsChart.data.datasets.length - 1;
   }
   rmsChart.data.datasets[tIdx].data = rmsChart.data.labels.map(() => thresh);
+
   rmsChart.update();
 }
+
 document.getElementById('threshSlider').addEventListener('input', e => {
   threshMult = parseFloat(e.target.value);
   document.getElementById('threshVal').textContent = threshMult.toFixed(1);
@@ -820,35 +933,43 @@ function renderFeed(events) {
 }
 
 function renderNodes(nodes) {
-  const sel = document.getElementById('nodeFilter');
-  const existing = Array.from(sel.options).map(o => o.value);
-  nodes.forEach(n => {
-    if (!existing.includes(n.node_id)) {
-      const opt = document.createElement('option');
-      opt.value = n.node_id; opt.textContent = n.node_id;
-      sel.appendChild(opt);
-    }
+  // Update ALL node dropdowns in the page (nav filter + history filter)
+  ['nodeFilter', 'histNode'].forEach(selId => {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    const existing = Array.from(sel.options).map(o => o.value);
+    nodes.forEach(n => {
+      if (!existing.includes(n.node_id)) {
+        const opt = document.createElement('option');
+        opt.value = n.node_id; opt.textContent = n.node_id;
+        sel.appendChild(opt);
+      }
+    });
   });
 
   // Sidebar
   const list = document.getElementById('nodeList');
   list.innerHTML = '';
-  nodes.forEach(n => {
-    const el = document.createElement('div');
-    const isDisabled = n.enabled === 0;
-    el.className = `node-entry ${n.status==='online'?'online':'offline'} ${isDisabled?'disabled':''}`;
-    const nc = nodeColor(n.node_id);
-    el.innerHTML = `
-      <div class="node-name" style="color:${nc}">${(n.location||n.node_id).toUpperCase()}</div>
-      <div class="node-stats">
-        <span class="ns">${n.total_events||0} evt</span>
-        <span class="ns ${(n.suspicious_events||0)>0?'alert':''}"> ${n.suspicious_events||0} susp</span>
-        <span class="ns">${n.status==='online'?'● ON':'○ OFF'}</span>
-      </div>`;
-    list.appendChild(el);
-  });
+  if (!nodes.length) {
+    list.innerHTML = '<div style="padding:8px 20px;font-family:var(--mono);font-size:10px;color:var(--border2)">No nodes registered</div>';
+  } else {
+    nodes.forEach(n => {
+      const isDisabled = n.enabled === 0;
+      const el = document.createElement('div');
+      el.className = `node-entry ${n.status==='online'?'online':'offline'} ${isDisabled?'disabled':''}`;
+      const nc = nodeColor(n.node_id);
+      el.innerHTML = `
+        <div class="node-name" style="color:${nc}">${(n.location||n.node_id).toUpperCase()}</div>
+        <div class="node-stats">
+          <span class="ns">${n.total_events||0} evt</span>
+          <span class="ns ${(n.suspicious_events||0)>0?'alert':''}"> ${n.suspicious_events||0} susp</span>
+          <span class="ns">${n.status==='online'?'● ON':'○ OFF'}</span>
+        </div>`;
+      list.appendChild(el);
+    });
+  }
 
-  // Node table
+  // Node summary table
   const tbody = document.getElementById('nodeTable');
   tbody.innerHTML = '';
   nodes.forEach(n => {
@@ -933,16 +1054,97 @@ fetchAll();
 setInterval(fetchAll, 4000);
 document.getElementById('nodeFilter').addEventListener('change', fetchAll);
 
+// ── Server-Sent Events — instant suspicious alert push ─────────────────
+// Opens a persistent connection to /api/events/stream.
+// When the server broadcasts a 'suspicious' event the browser immediately
+// re-fetches live data instead of waiting up to 4s for the next poll cycle.
+let sseReconnectDelay = 1000;
+
+function connectSSE() {
+  const es = new EventSource('/api/events/stream');
+
+  es.addEventListener('connected', () => {
+    console.log('[SSE] Connected to event stream');
+    sseReconnectDelay = 1000; // reset backoff on successful connect
+  });
+
+  es.addEventListener('suspicious', e => {
+    try {
+      const payload = JSON.parse(e.data);
+      console.log('[SSE] Suspicious event received:', payload.node_id, payload.label);
+
+      // Flash the nav badge briefly to draw attention
+      const badge = document.getElementById('dbModeBadge');
+      const orig  = badge.textContent;
+      const origClass = badge.className;
+      badge.textContent = '⚠ ALERT';
+      badge.className   = 'nav-badge';
+      badge.style.background   = 'rgba(255,61,90,.25)';
+      badge.style.color        = 'var(--red)';
+      badge.style.borderColor  = 'var(--red)';
+      setTimeout(() => {
+        badge.textContent      = orig;
+        badge.className        = origClass;
+        badge.style.background = '';
+        badge.style.color      = '';
+        badge.style.borderColor= '';
+      }, 2500);
+
+      // Immediately refresh feed, stats, nodes, correlated
+      fetchAll();
+    } catch(_) {}
+  });
+
+  es.onerror = () => {
+    es.close();
+    // Exponential backoff reconnect (max 30s)
+    setTimeout(connectSSE, sseReconnectDelay);
+    sseReconnectDelay = Math.min(sseReconnectDelay * 2, 30000);
+  };
+}
+
+connectSSE();
+
 // ══════════════════════════════════════════════════════════════════════
 // HISTORY TAB
 // ══════════════════════════════════════════════════════════════════════
-let histState = { page:1, total:0, pages:1 };
+let histState = { page:1, total:0, pages:1, sort:'id', dir:'DESC' };
+
+// Column header sort toggle
+function histSort(col) {
+  if (histState.sort === col) {
+    // Same column — flip direction
+    histState.dir = histState.dir === 'DESC' ? 'ASC' : 'DESC';
+  } else {
+    // New column — default to DESC (most useful default for all cols)
+    histState.sort = col;
+    histState.dir  = 'DESC';
+  }
+  histFetch(1);
+}
+
+// Update the column header visual indicators to show active sort column + direction
+function updateHistHeaders() {
+  document.querySelectorAll('#histThead .sort-th').forEach(th => {
+    const col = th.getAttribute('onclick').match(/'([^']+)'/)?.[1];
+    const arrow = th.querySelector('.sort-arrow');
+    if (col === histState.sort) {
+      th.classList.add('active');
+      arrow.textContent = histState.dir === 'DESC' ? ' ↓' : ' ↑';
+    } else {
+      th.classList.remove('active');
+      arrow.textContent = ' ↕';
+    }
+  });
+}
 
 async function histFetch(page=1) {
   histState.page = page;
   const params = new URLSearchParams({
     page,
-    per: 50,
+    per:      50,
+    sort:     histState.sort,
+    dir:      histState.dir,
     node:     document.getElementById('histNode').value,
     label:    document.getElementById('histLabel').value,
     severity: document.getElementById('histSeverity').value,
@@ -952,6 +1154,8 @@ async function histFetch(page=1) {
   });
   // Remove empty params
   for (const [k,v] of [...params.entries()]) if (!v) params.delete(k);
+
+  updateHistHeaders();
 
   const data = await fetch('/api/history?' + params).then(r=>r.json());
   histState.total = data.total; histState.pages = data.pages;
@@ -991,12 +1195,17 @@ function histClear() {
     if (el) el.value = '';
   });
   document.getElementById('histSuspOnly').checked = false;
+  // Reset sort to default
+  histState.sort = 'id';
+  histState.dir  = 'DESC';
   histFetch(1);
 }
 
 function histExportCSV() {
   const params = new URLSearchParams({
     page: 1, per: 5000,
+    sort:     histState.sort,
+    dir:      histState.dir,
     node:     document.getElementById('histNode').value,
     label:    document.getElementById('histLabel').value,
     severity: document.getElementById('histSeverity').value,
@@ -1016,21 +1225,6 @@ function histExportCSV() {
     a.click();
   });
 }
-
-// Populate history node dropdown from live nodes
-async function populateHistoryNodeFilter() {
-  const nodes = await fetch('/api/nodes').then(r=>r.json());
-  const sel = document.getElementById('histNode');
-  const existing = Array.from(sel.options).map(o=>o.value);
-  nodes.forEach(n => {
-    if (!existing.includes(n.node_id)) {
-      const o = document.createElement('option');
-      o.value = n.node_id; o.textContent = n.node_id;
-      sel.appendChild(o);
-    }
-  });
-}
-populateHistoryNodeFilter();
 
 // ══════════════════════════════════════════════════════════════════════
 // QUERY LAB TAB
@@ -1053,41 +1247,95 @@ PRESETS.forEach(p => {
   presetsEl.appendChild(btn);
 });
 
+let lastQueryData = null;
+
 async function runQuery() {
   const sql = document.getElementById('sqlInput').value.trim();
   if (!sql) return;
-  document.getElementById('queryError').style.display = 'none';
-  document.getElementById('queryResultWrap').style.display = 'none';
-  document.getElementById('queryMeta').innerHTML = '';
+  const errEl    = document.getElementById('queryError');
+  const metaEl   = document.getElementById('queryMeta');
+  const resultEl = document.getElementById('queryResultPanel');
+  const copyBtn  = document.getElementById('copyBtn');
+  errEl.style.display = 'none';
+  resultEl.style.display = 'none';
+  copyBtn.style.display = 'none';
+  metaEl.innerHTML = '<span style="color:var(--muted)">Running…</span>';
+
   const t0 = performance.now();
   try {
-    const res = await fetch('/api/admin/query', {
-      method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ sql })
+    const res = await adminFetch('/api/admin/query', {
+      method:'POST', body:JSON.stringify({ sql })
     });
+    if (!res) return; // login cancelled
     const data = await res.json();
     const elapsed = (performance.now() - t0).toFixed(0);
+
     if (!res.ok) {
-      document.getElementById('queryError').textContent = '⚠ ' + data.error;
-      document.getElementById('queryError').style.display = 'block'; return;
+      errEl.textContent = '⚠ ' + data.error;
+      errEl.style.display = 'block';
+      metaEl.innerHTML = '';
+      return;
     }
-    document.getElementById('queryMeta').innerHTML =
-      `<span>${data.count}</span> rows · <span>${elapsed}ms</span>`;
-    // Render table
-    const head = document.getElementById('queryHead');
+
+    lastQueryData = data;
+    metaEl.innerHTML = `<span>${data.count}</span> rows · <span>${elapsed}ms</span>`;
+
+    // Render result table
+    document.getElementById('queryHead').innerHTML =
+      '<tr>' + data.cols.map(c=>`<th>${c}</th>`).join('') + '</tr>';
     const body = document.getElementById('queryBody');
-    head.innerHTML = '<tr>' + data.cols.map(c=>`<th>${c}</th>`).join('') + '</tr>';
     body.innerHTML = '';
-    data.rows.forEach(r => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = data.cols.map(c => `<td>${r[c]??''}</td>`).join('');
-      body.appendChild(tr);
-    });
-    document.getElementById('queryResultWrap').style.display = 'block';
+    if (!data.rows.length) {
+      body.innerHTML = `<tr><td colspan="${data.cols.length}" style="color:var(--muted);text-align:center;padding:16px">Query returned 0 rows</td></tr>`;
+    } else {
+      data.rows.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = data.cols.map(c => {
+          const v = r[c] ?? '';
+          // Highlight suspicious=1, status=online etc
+          if (c === 'is_suspicious' && v === 1) return `<td style="color:var(--red)">1</td>`;
+          if (c === 'status' && v === 'online') return `<td style="color:var(--green)">${v}</td>`;
+          if (c === 'status' && v === 'offline') return `<td style="color:var(--muted)">${v}</td>`;
+          if (c === 'severity' && v === 'HIGH') return `<td style="color:var(--red)">${v}</td>`;
+          if (c === 'severity' && v === 'MEDIUM') return `<td style="color:var(--amber)">${v}</td>`;
+          if ((c === 'node_id' || c === 'node_a' || c === 'node_b') && v)
+            return `<td style="color:${nodeColor(v)};font-family:var(--mono)">${v}</td>`;
+          return `<td>${v}</td>`;
+        }).join('');
+        body.appendChild(tr);
+      });
+    }
+    document.getElementById('queryResultMeta').textContent = `${data.count} rows · ${elapsed}ms`;
+    resultEl.style.display = 'block';
+    if (data.count > 0) copyBtn.style.display = 'inline-block';
   } catch(e) {
-    document.getElementById('queryError').textContent = '⚠ ' + e.message;
-    document.getElementById('queryError').style.display = 'block';
+    errEl.textContent = '⚠ ' + e.message;
+    errEl.style.display = 'block';
+    metaEl.innerHTML = '';
   }
 }
+
+function clearQuery() {
+  document.getElementById('sqlInput').value = '';
+  document.getElementById('queryError').style.display = 'none';
+  document.getElementById('queryResultPanel').style.display = 'none';
+  document.getElementById('queryMeta').innerHTML = '';
+  document.getElementById('copyBtn').style.display = 'none';
+  lastQueryData = null;
+}
+
+function copyQueryCSV() {
+  if (!lastQueryData) return;
+  const { cols, rows } = lastQueryData;
+  const lines = [cols.join(',')];
+  rows.forEach(r => lines.push(cols.map(c => JSON.stringify(r[c]??'')).join(',')));
+  const blob = new Blob([lines.join('\n')], { type:'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `isd_query_${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.csv`;
+  a.click();
+}
+
 document.getElementById('sqlInput').addEventListener('keydown', e => {
   if (e.ctrlKey && e.key === 'Enter') runQuery();
 });
@@ -1095,15 +1343,94 @@ document.getElementById('sqlInput').addEventListener('keydown', e => {
 // ══════════════════════════════════════════════════════════════════════
 // MAINTENANCE TAB
 // ══════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════
+// ADMIN AUTHENTICATION
+// API key stored in sessionStorage – cleared when the tab is closed.
+// ══════════════════════════════════════════════════════════════════════
+let adminKey = sessionStorage.getItem('isd_admin_key') || '';
+let _loginResolve = null;
+
+function getAdminKey() { return adminKey; }
+
+function promptLogin() {
+  return new Promise(resolve => {
+    _loginResolve = resolve;
+    document.getElementById('loginError').style.display = 'none';
+    document.getElementById('loginKeyInput').value = '';
+    document.getElementById('loginModal').classList.add('open');
+    setTimeout(() => document.getElementById('loginKeyInput').focus(), 80);
+  });
+}
+
+async function submitLogin() {
+  const key = document.getElementById('loginKeyInput').value.trim();
+  if (!key) return;
+  try {
+    const res = await fetch('/api/auth/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key }),
+    });
+    if (res.ok) {
+      adminKey = key;
+      sessionStorage.setItem('isd_admin_key', key);
+      document.getElementById('loginModal').classList.remove('open');
+      if (_loginResolve) { _loginResolve(true); _loginResolve = null; }
+    } else {
+      document.getElementById('loginError').style.display = 'block';
+    }
+  } catch(e) {
+    document.getElementById('loginError').style.display = 'block';
+  }
+}
+
+function cancelLogin() {
+  document.getElementById('loginModal').classList.remove('open');
+  if (_loginResolve) { _loginResolve(false); _loginResolve = null; }
+  // Switch back to Live Feed if they cancel
+  document.querySelector('.side-item[data-tab="live"]').click();
+}
+
+// Authenticated fetch wrapper for all /api/admin/* calls.
+// If no key is stored or a 401 is received, prompts the login modal.
+async function adminFetch(url, opts = {}) {
+  // Ensure we have a key first
+  if (!adminKey) {
+    const ok = await promptLogin();
+    if (!ok) return null;
+  }
+  const headers = { 'Content-Type': 'application/json', 'X-Admin-Key': adminKey,
+                    ...(opts.headers || {}) };
+  let res = await fetch(url, { ...opts, headers });
+  // Key was rejected (maybe changed on server) – prompt again once
+  if (res.status === 401) {
+    adminKey = '';
+    sessionStorage.removeItem('isd_admin_key');
+    const ok = await promptLogin();
+    if (!ok) return null;
+    headers['X-Admin-Key'] = adminKey;
+    res = await fetch(url, { ...opts, headers });
+  }
+  return res;
+}
+
 let maintNodes = [];
 let editTarget = null;
 
 async function maintRefresh() {
-  const [nodes, discovered, stats] = await Promise.all([
-    fetch('/api/admin/nodes').then(r=>r.json()),
-    fetch('/api/admin/nodes/discovered').then(r=>r.json()),
+  // Ensure authenticated before making admin requests
+  if (!adminKey) {
+    const ok = await promptLogin();
+    if (!ok) return;
+  }
+  const [nodesRes, discoveredRes, stats] = await Promise.all([
+    adminFetch('/api/admin/nodes'),
+    adminFetch('/api/admin/nodes/discovered'),
     fetch('/api/stats').then(r=>r.json()),
   ]);
+  if (!nodesRes || !discoveredRes) return; // login cancelled
+  const nodes      = await nodesRes.json();
+  const discovered = await discoveredRes.json();
   maintNodes = nodes;
 
   // Discovered
@@ -1187,10 +1514,11 @@ async function maintRefresh() {
 }
 
 async function registerDiscovered(nodeId) {
-  const res = await fetch('/api/admin/nodes', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+  const res = await adminFetch('/api/admin/nodes', {
+    method:'POST',
     body: JSON.stringify({ node_id: nodeId, location: '', notes: 'Auto-registered from discovery' })
   });
+  if (!res) return;
   if (res.ok) { showToast(`${nodeId} registered`); maintRefresh(); }
   else { const d = await res.json(); showToast(d.error || 'Error', 'err'); }
 }
@@ -1200,10 +1528,11 @@ async function addNode() {
   const location = document.getElementById('addNodeLoc').value.trim();
   const notes    = document.getElementById('addNodeNotes').value.trim();
   if (!node_id) { showToast('Node ID is required', 'err'); return; }
-  const res = await fetch('/api/admin/nodes', {
-    method:'POST', headers:{'Content-Type':'application/json'},
+  const res = await adminFetch('/api/admin/nodes', {
+    method:'POST',
     body: JSON.stringify({ node_id, location, notes })
   });
+  if (!res) return;
   const data = await res.json();
   if (res.ok) {
     showToast(`${node_id} registered`);
@@ -1216,7 +1545,8 @@ async function addNode() {
 
 async function removeNode(id) {
   if (!confirm(`Remove node "${id}" from the database?\n\nThis only removes the registration record — historical events are preserved.`)) return;
-  const res = await fetch(`/api/admin/nodes/${id}`, { method:'DELETE' });
+  const res = await adminFetch(`/api/admin/nodes/${id}`, { method:'DELETE' });
+  if (!res) return;
   if (res.ok) { showToast(`${id} removed`); maintRefresh(); }
   else showToast('Error removing node', 'err');
 }
@@ -1243,9 +1573,10 @@ async function saveEditModal() {
     notes:    document.getElementById('editNotes').value.trim(),
     enabled:  document.getElementById('editEnabled').checked,
   };
-  const res = await fetch(`/api/admin/nodes/${editTarget}`, {
-    method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)
+  const res = await adminFetch(`/api/admin/nodes/${editTarget}`, {
+    method:'PUT', body:JSON.stringify(payload)
   });
+  if (!res) return;
   if (res.ok) { showToast('Node updated'); closeEditModal(); maintRefresh(); }
   else showToast('Update failed', 'err');
 }
@@ -1276,7 +1607,8 @@ function loadDiag() {
 async function diagPing() {
   const id = document.getElementById('diagNodeSel').value;
   if (!id) return;
-  const res = await fetch(`/api/admin/nodes/${id}/ping`, { method:'POST' });
+  const res = await adminFetch(`/api/admin/nodes/${id}/ping`, { method:'POST' });
+  if (!res) return;
   const data = await res.json();
   document.getElementById('diagResult').textContent = res.ok
     ? `✓ Ping recorded at ${new Date(data.pinged_at).toLocaleTimeString()}`
@@ -1288,7 +1620,8 @@ async function diagClear() {
   const id = document.getElementById('diagNodeSel').value;
   if (!id) return;
   if (!confirm(`Clear ALL detection events and RMS frames for node "${id}"?\n\nThis cannot be undone.`)) return;
-  const res = await fetch(`/api/admin/nodes/${id}/clear`, { method:'POST' });
+  const res = await adminFetch(`/api/admin/nodes/${id}/clear`, { method:'POST' });
+  if (!res) return;
   if (res.ok) { showToast(`Events cleared for ${id}`); document.getElementById('diagResult').textContent = '✓ Events cleared'; maintRefresh(); }
   else showToast('Clear failed', 'err');
 }

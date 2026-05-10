@@ -4,23 +4,30 @@
  * Reads live detection data from host.db written by host_subscriber.py.
  * Falls back to seeded demo data if host.db is not found.
  *
+ * Authentication
+ * ──────────────
+ * Public routes  (read-only data)  : no auth required
+ * Admin routes   /api/admin/*      : require X-Admin-Key header matching
+ *                                    the ADMIN_API_KEY environment variable
+ *
  * API surface:
- *   GET  /api/events          – detection event feed
- *   GET  /api/stats           – summary counters
- *   GET  /api/nodes           – node list with stats
- *   GET  /api/rms             – RMS frames for chart
- *   GET  /api/correlated      – cross-node correlated events
- *   GET  /api/localization    – Sound Localization stub
- *   GET  /api/status          – db mode
- *   GET  /api/history         – paginated, filterable event history
- *   POST /api/admin/query     – safe read-only SQL query
- *   GET  /api/admin/nodes/discovered  – nodes seen in events but not in node_status
- *   GET  /api/admin/nodes     – full node_status table
- *   POST /api/admin/nodes     – register a new node manually
- *   PUT  /api/admin/nodes/:id – rename / update location / toggle enabled
- *   DELETE /api/admin/nodes/:id – remove a node record
- *   POST /api/admin/nodes/:id/ping – mark last_seen=now (simulated ping)
- *   POST /api/admin/nodes/:id/clear – delete all events for a node
+ *   GET  /api/events                    – detection event feed
+ *   GET  /api/stats                     – summary counters
+ *   GET  /api/nodes                     – node list with stats
+ *   GET  /api/rms                       – RMS frames for chart
+ *   GET  /api/correlated                – cross-node correlated events
+ *   GET  /api/localization              – Sound Localization stub
+ *   GET  /api/status                    – db mode
+ *   GET  /api/history                   – paginated, filterable event history
+ *   POST /api/admin/query               – safe read-only SQL query       [AUTH]
+ *   GET  /api/admin/nodes/discovered    – unregistered nodes             [AUTH]
+ *   GET  /api/admin/nodes               – full node_status table         [AUTH]
+ *   POST /api/admin/nodes               – register a new node            [AUTH]
+ *   PUT  /api/admin/nodes/:id           – rename / update / toggle       [AUTH]
+ *   DELETE /api/admin/nodes/:id         – remove a node record           [AUTH]
+ *   POST /api/admin/nodes/:id/ping      – mark last_seen=now             [AUTH]
+ *   POST /api/admin/nodes/:id/clear     – delete all events for a node   [AUTH]
+ *   POST /api/auth/verify               – verify API key (returns ok/fail)
  */
 
 const express = require('express');
@@ -29,14 +36,24 @@ const cors    = require('cors');
 const path    = require('path');
 const fs      = require('fs');
 
+// Load .env file if present (local dev). In Docker the values come from
+// the environment block in docker-compose.yml instead.
+try { require('dotenv').config(); } catch(_) { /* dotenv optional */ }
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ── Config ─────────────────────────────────────────────────────────────
-const HOST_DB_PATH     = process.env.ISD_DB_PATH || 'C:\\ImpulsiveSoundDetection\\host.db';
+const HOST_DB_PATH     = process.env.ISD_DB_PATH   || 'C:\\ImpulsiveSoundDetection\\host.db';
+const ADMIN_API_KEY    = process.env.ADMIN_API_KEY  || 'isd-admin-changeme';
+const PORT             = parseInt(process.env.PORT  || '3000', 10);
 const POLL_INTERVAL_MS = 2000;
+
+if (ADMIN_API_KEY === 'isd-admin-changeme') {
+  console.warn('[WARN] ADMIN_API_KEY is using the default value. Set it in .env for production.');
+}
 
 let db;
 let dbMode = 'demo';
@@ -59,6 +76,19 @@ function get(sql, params = []) { return all(sql, params)[0] || null; }
 function run(sql, params = [])  {
   try { db.run(sql, params); return true; }
   catch(e) { console.error('Run error:', e.message); return false; }
+}
+
+// Write the in-memory sql.js database back to disk.
+// Called after every admin write so changes survive the next live DB reload.
+// In demo mode this is a no-op since there is no host.db file to write.
+function persistDb() {
+  if (dbMode !== 'live') return;
+  try {
+    const data = db.export();
+    fs.writeFileSync(HOST_DB_PATH, Buffer.from(data));
+  } catch(e) {
+    console.error('[DB] Failed to persist to disk:', e.message);
+  }
 }
 
 // ── Load or seed database ───────────────────────────────────────────────
@@ -91,6 +121,7 @@ async function reloadLiveDb(SQL) {
     const newDb = new SQL.Database(fileBuffer);
     newDb.prepare('SELECT 1 FROM detection_events LIMIT 1').free();
     db = newDb;
+    ensureAdminColumns();   // re-apply after every reload
   } catch (e) {
     // DB locked mid-write – skip this cycle
   }
@@ -182,6 +213,89 @@ function ensureAdminColumns() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// SERVER-SENT EVENTS (SSE) — real-time push to browser tabs
+// The browser opens GET /api/events/stream and keeps the connection open.
+// When a suspicious detection arrives the server broadcasts an event,
+// which causes the frontend to immediately re-fetch live data without
+// waiting for the next 4-second poll cycle.
+// ══════════════════════════════════════════════════════════════════════
+const sseClients = new Set();
+
+// Called internally whenever a suspicious event should be broadcast.
+function broadcastSuspicious(payload) {
+  const data = JSON.stringify(payload);
+  for (const res of sseClients) {
+    try {
+      res.write(`event: suspicious\ndata: ${data}\n\n`);
+    } catch(_) {
+      sseClients.delete(res);
+    }
+  }
+  if (sseClients.size > 0) {
+    console.log(`[SSE] Broadcast suspicious event to ${sseClients.size} client(s):`, payload.node_id, payload.label);
+  }
+}
+
+// SSE stream endpoint — browser connects here once on page load
+app.get('/api/events/stream', (req, res) => {
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no'); // disable nginx buffering if proxied
+  res.flushHeaders();
+
+  // Send an immediate ping so the browser knows the connection is alive
+  res.write('event: connected\ndata: {"status":"ok"}\n\n');
+
+  sseClients.add(res);
+  console.log(`[SSE] Client connected (total: ${sseClients.size})`);
+
+  // Heartbeat every 25s to keep the connection alive through proxies/firewalls
+  const hb = setInterval(() => {
+    try { res.write(': heartbeat\n\n'); } catch(_) { clearInterval(hb); }
+  }, 25000);
+
+  req.on('close', () => {
+    clearInterval(hb);
+    sseClients.delete(res);
+    console.log(`[SSE] Client disconnected (total: ${sseClients.size})`);
+  });
+});
+
+// Internal notify endpoint — called by host_subscriber.py after writing
+// a suspicious detection to host.db.  Localhost-only (no auth needed
+// since it is not exposed outside the host network).
+app.post('/api/internal/notify', (req, res) => {
+  const payload = req.body || {};
+  broadcastSuspicious(payload);
+  res.json({ ok: true, clients: sseClients.size });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// AUTHENTICATION MIDDLEWARE
+// Admin routes require the request header:
+//   X-Admin-Key: <ADMIN_API_KEY value from .env>
+// The dashboard frontend stores the key in sessionStorage after login.
+// ══════════════════════════════════════════════════════════════════════
+function requireAdmin(req, res, next) {
+  const provided = req.headers['x-admin-key'] || '';
+  if (!provided || provided !== ADMIN_API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized – valid X-Admin-Key required.' });
+  }
+  next();
+}
+
+// Key verification endpoint – used by the frontend login prompt
+app.post('/api/auth/verify', (req, res) => {
+  const { key } = req.body || {};
+  if (key === ADMIN_API_KEY) {
+    res.json({ ok: true });
+  } else {
+    res.status(401).json({ ok: false, error: 'Invalid key' });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════
 // API ROUTES
 // ══════════════════════════════════════════════════════════════════════
 
@@ -271,6 +385,18 @@ app.get('/api/status', (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 // HISTORY  /api/history
 // ══════════════════════════════════════════════════════════════════════
+// Allowed sort columns – whitelist prevents SQL injection via ORDER BY
+const HIST_SORT_COLS = {
+  id:           'id',
+  node_id:      'node_id',
+  label:        'label',
+  confidence:   'confidence',
+  is_suspicious:'is_suspicious',
+  severity:     "CASE severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 ELSE 1 END",
+  inserted_at:  'inserted_at',
+  wall_clock_time: 'wall_clock_time',
+};
+
 app.get('/api/history', (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page)  || 1);
   const perPage  = Math.min(200, parseInt(req.query.per) || 50);
@@ -281,6 +407,11 @@ app.get('/api/history', (req, res) => {
   const suspOnly = req.query.susp === '1';
   const dateFrom = req.query.from     || null;
   const dateTo   = req.query.to       || null;
+
+  // Sort: validate column against whitelist, direction must be ASC or DESC
+  const sortKey  = req.query.sort || 'id';
+  const sortCol  = HIST_SORT_COLS[sortKey] || 'id';
+  const sortDir  = req.query.dir === 'ASC' ? 'ASC' : 'DESC';
 
   const clauses = [];
   if (node)     clauses.push(`node_id = '${node.replace(/'/g,"''")}'`);
@@ -298,10 +429,16 @@ app.get('/api/history', (req, res) => {
            COALESCE(severity,'LOW') AS severity,
            timestamp_node, wall_clock_time, inserted_at, session_id
     FROM detection_events ${where}
-    ORDER BY id DESC LIMIT ${perPage} OFFSET ${offset}
+    ORDER BY ${sortCol} ${sortDir}
+    LIMIT ${perPage} OFFSET ${offset}
   `);
 
-  res.json({ total, page, per_page: perPage, pages: Math.ceil(total/perPage), rows });
+  res.json({
+    total, page, per_page: perPage,
+    pages: Math.ceil(total/perPage),
+    sort: sortKey, dir: sortDir,
+    rows
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════
@@ -309,7 +446,7 @@ app.get('/api/history', (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 const BLOCKED = ['INSERT','UPDATE','DELETE','DROP','CREATE','ALTER','ATTACH','PRAGMA'];
 
-app.post('/api/admin/query', (req, res) => {
+app.post('/api/admin/query', requireAdmin, (req, res) => {
   const { sql } = req.body || {};
   if (!sql || typeof sql !== 'string') return res.status(400).json({ error: 'No SQL provided' });
 
@@ -317,8 +454,9 @@ app.post('/api/admin/query', (req, res) => {
   if (!upper.startsWith('SELECT') && !upper.startsWith('WITH')) {
     return res.status(403).json({ error: 'Only SELECT / WITH queries are permitted.' });
   }
+  // Use word-boundary regex so "inserted_at" does NOT match "INSERT"
   for (const kw of BLOCKED) {
-    if (upper.includes(kw)) {
+    if (new RegExp(`\\b${kw}\\b`).test(upper)) {
       return res.status(403).json({ error: `Keyword '${kw}' is not permitted.` });
     }
   }
@@ -340,7 +478,7 @@ app.post('/api/admin/query', (req, res) => {
 // ══════════════════════════════════════════════════════════════════════
 
 // Nodes seen in events but not registered in node_status (new node discovery)
-app.get('/api/admin/nodes/discovered', (req, res) => {
+app.get('/api/admin/nodes/discovered', requireAdmin, (req, res) => {
   const rows = all(`
     SELECT DISTINCT de.node_id, MAX(de.inserted_at) AS last_event,
            COUNT(*) AS event_count
@@ -353,7 +491,7 @@ app.get('/api/admin/nodes/discovered', (req, res) => {
 });
 
 // All nodes (admin view with enabled/notes)
-app.get('/api/admin/nodes', (req, res) => {
+app.get('/api/admin/nodes', requireAdmin, (req, res) => {
   ensureAdminColumns();
   res.json(all(`
     SELECT ns.node_id, COALESCE(ns.location,'') AS location,
@@ -369,7 +507,7 @@ app.get('/api/admin/nodes', (req, res) => {
 });
 
 // Register a new node manually
-app.post('/api/admin/nodes', (req, res) => {
+app.post('/api/admin/nodes', requireAdmin, (req, res) => {
   ensureAdminColumns();
   const { node_id, location, notes } = req.body || {};
   if (!node_id) return res.status(400).json({ error: 'node_id required' });
@@ -378,11 +516,12 @@ app.post('/api/admin/nodes', (req, res) => {
   run(`INSERT INTO node_status (node_id,location,status,last_seen,enabled,notes)
        VALUES (?,?,?,?,1,?)`,
       [node_id, location||'', 'offline', 0, notes||'']);
+  persistDb();
   res.json({ ok: true, node_id });
 });
 
 // Update a node (rename location, toggle enabled, set notes)
-app.put('/api/admin/nodes/:id', (req, res) => {
+app.put('/api/admin/nodes/:id', requireAdmin, (req, res) => {
   ensureAdminColumns();
   const { id } = req.params;
   const { location, enabled, notes } = req.body || {};
@@ -396,28 +535,32 @@ app.put('/api/admin/nodes/:id', (req, res) => {
   if (notes !== undefined)
     run(`UPDATE node_status SET notes=? WHERE node_id=?`, [notes, id]);
 
+  persistDb();
   res.json({ ok: true });
 });
 
 // Remove a node record (does not delete events)
-app.delete('/api/admin/nodes/:id', (req, res) => {
+app.delete('/api/admin/nodes/:id', requireAdmin, (req, res) => {
   const { id } = req.params;
   run(`DELETE FROM node_status WHERE node_id=?`, [id]);
+  persistDb();
   res.json({ ok: true });
 });
 
 // Ping: update last_seen to now (simulated connectivity check)
-app.post('/api/admin/nodes/:id/ping', (req, res) => {
+app.post('/api/admin/nodes/:id/ping', requireAdmin, (req, res) => {
   const { id } = req.params;
   run(`UPDATE node_status SET last_seen=? WHERE node_id=?`, [Date.now()/1000, id]);
+  persistDb();
   res.json({ ok: true, pinged_at: new Date().toISOString() });
 });
 
 // Clear all events for a node
-app.post('/api/admin/nodes/:id/clear', (req, res) => {
+app.post('/api/admin/nodes/:id/clear', requireAdmin, (req, res) => {
   const { id } = req.params;
   run(`DELETE FROM detection_events WHERE node_id=?`, [id]);
   run(`DELETE FROM rms_frames WHERE node_id=?`, [id]);
+  persistDb();
   res.json({ ok: true });
 });
 
@@ -425,6 +568,10 @@ app.post('/api/admin/nodes/:id/clear', (req, res) => {
 async function main() {
   const SQL = await initSql();
   await loadDatabase(SQL);
+
+  // Ensure admin columns exist in node_status immediately after DB load
+  // so /api/nodes never fails with "no such column: ns.enabled"
+  ensureAdminColumns();
 
   setInterval(() => reloadLiveDb(SQL), POLL_INTERVAL_MS);
 
@@ -451,11 +598,22 @@ async function main() {
       run(`INSERT INTO rms_frames (node_id,ts,rms,baseline,threshold,is_trigger)
            VALUES (?,?,?,?,?,?)`,
           [pick.node, now, rms, 0.06, 0.18, rms > 0.18 ? 1 : 0]);
+      // Push SSE update to all connected browsers when a suspicious demo event fires
+      if (pick.susp) {
+        broadcastSuspicious({
+          node_id:      pick.node,
+          label:        pick.label,
+          is_suspicious: true,
+          severity:     pick.severity,
+          ts:           now,
+          source:       'demo',
+        });
+      }
     }, 4000);
   }
 
-  app.listen(3000, '0.0.0.0', () => {
-    console.log(`ISD Dashboard → http://localhost:3000`);
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`ISD Dashboard → http://localhost:${PORT}`);
     console.log(`Database mode : ${dbMode.toUpperCase()}`);
     if (dbMode === 'live') console.log(`Reading from  : ${HOST_DB_PATH}`);
     else console.log(`Demo mode – run host_subscriber.py to switch to live data`);

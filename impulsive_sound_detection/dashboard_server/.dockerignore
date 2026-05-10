@@ -1,0 +1,19 @@
+# Dependencies – reinstalled inside the container by npm install
+node_modules/
+
+# Environment file with secrets – injected via docker-compose environment block
+.env
+
+# Logs that belong on the host, not inside the image
+*.log
+logs/
+
+# Development / editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Git history – not needed inside the image
+.git/
+.gitignore

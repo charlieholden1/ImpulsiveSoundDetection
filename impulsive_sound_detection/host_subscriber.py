@@ -32,6 +32,7 @@ import logging
 import sqlite3
 import threading
 import time
+import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -81,6 +82,7 @@ class HostSubscriber:
         on_rms: Optional[Callable[[str, dict], None]] = None,
         on_localization: Optional[Callable[[dict], None]] = None,
         db_path: Optional[Path] = None,
+        dashboard_url: str = "http://localhost:3000",
     ) -> None:
         if not _PAHO_AVAILABLE:
             raise ImportError(
@@ -88,12 +90,13 @@ class HostSubscriber:
                 "Install it with:  pip install paho-mqtt"
             )
 
-        self._broker_host = broker_host
-        self._broker_port = broker_port
-        self._on_detection = on_detection
-        self._on_rms = on_rms
+        self._broker_host   = broker_host
+        self._broker_port   = broker_port
+        self._on_detection  = on_detection
+        self._on_rms        = on_rms
         self._on_localization = on_localization
-        self._db_path = db_path or HOST_DB_PATH
+        self._db_path       = db_path or HOST_DB_PATH
+        self._dashboard_url = dashboard_url.rstrip('/')
 
         self._client: mqtt.Client = mqtt.Client(
             client_id="isd-host-subscriber",
@@ -301,8 +304,46 @@ class HostSubscriber:
             result.is_suspicious, result.severity,
         )
         self._db_insert_detection(result)
+        if result.is_suspicious:
+            self._notify_dashboard(result)
         if self._on_detection:
             self._on_detection(result)
+
+    def _notify_dashboard(self, result: ClassificationResult) -> None:
+        """POST to the dashboard's internal SSE notify endpoint.
+
+        Runs in a daemon thread so it never blocks the MQTT message loop.
+        Silently ignored if the dashboard server is not reachable.
+        """
+        url = f"{self._dashboard_url}/api/internal/notify"
+        payload = json.dumps({
+            "node_id":       result.node_id,
+            "label":         result.label,
+            "confidence":    round(result.confidence, 4),
+            "is_suspicious": result.is_suspicious,
+            "severity":      result.severity,
+            "ts":            result.wall_clock_time,
+            "source":        "live",
+        }).encode("utf-8")
+
+        def _post() -> None:
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    logger.debug(
+                        "[SSE] Notified dashboard: %s %s (status %d)",
+                        result.node_id, result.label, resp.status,
+                    )
+            except Exception as exc:
+                # Dashboard may not be running — not a fatal error
+                logger.debug("[SSE] Dashboard notify failed: %s", exc)
+
+        threading.Thread(target=_post, daemon=True).start()
 
     def _handle_rms(self, topic: str, payload_str: str) -> None:
         data = json.loads(payload_str)
@@ -383,6 +424,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--broker-host", default=config.MQTT_BROKER_HOST)
     p.add_argument("--broker-port", type=int, default=config.MQTT_BROKER_PORT)
     p.add_argument("--db-path", default=str(HOST_DB_PATH))
+    p.add_argument(
+        "--dashboard-url",
+        default="http://localhost:3000",
+        help="Base URL of the dashboard server for SSE push notifications "
+             "(default: http://localhost:3000).",
+    )
     return p
 
 
@@ -393,6 +440,7 @@ if __name__ == "__main__":
         broker_host=args.broker_host,
         broker_port=args.broker_port,
         db_path=Path(args.db_path),
+        dashboard_url=args.dashboard_url,
     )
     sub.start()
     try:

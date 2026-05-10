@@ -8,4 +8,6 @@ services:
       - C:\Github\ImpulsiveSoundDetection\logs:/data
     environment:
       - ISD_DB_PATH=/data/host.db
+      - ADMIN_API_KEY=1382efe20e3024c1382ea79775007d47ea5ecbdbbc1f1764a053acc36ba0df81
+      - PORT=3000
     restart: unless-stopped

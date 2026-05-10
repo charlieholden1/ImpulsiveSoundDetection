@@ -21,6 +21,7 @@ build/
 .env
 .env.*
 *.env
+impulsive_sound_detection/dashboard_server/.env
 
 # ── Logs & output ─────────────────────────────────────────────────────
 *.log
