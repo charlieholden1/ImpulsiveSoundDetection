@@ -25,6 +25,7 @@ def load_spectrogram_dataset(
     batch_size: int = 32,
     random_state: int = 42,
     deduplicate: bool = True,
+    detect_outliers: bool = True,
 ) -> Tuple[tf.data.Dataset, tf.data.Dataset, tf.data.Dataset, dict]:
     """
     Load spectrogram PNG images and return stratified train/val/test tf.data.Dataset objects.
@@ -94,6 +95,9 @@ def load_spectrogram_dataset(
     if deduplicate:
         image_paths, labels = _deduplicate_exact_images(image_paths, labels)
 
+    if detect_outliers:
+        image_paths, labels = _detect_spectrogram_outliers(image_paths, labels)
+
     # Stratified 70/15/15 split
     train_paths, temp_paths, train_labels, temp_labels = train_test_split(
         image_paths,
@@ -137,6 +141,89 @@ def load_spectrogram_dataset(
     )
 
     return train_ds, val_ds, test_ds, class_weights_dict
+
+
+def _detect_spectrogram_outliers(
+    image_paths: np.ndarray,
+    labels: np.ndarray,
+    remove: bool = True,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Flag and optionally remove anomalous spectrograms based on image statistics.
+
+    Two signals identify likely rendering failures or corrupt PNGs:
+      - Mean brightness: images with mean < 5 or mean > 250 are near-black or
+        near-white, which indicates a failed spectrogram render.
+      - Pixel standard deviation: std < 2 means the image is nearly uniform
+        (solid colour), which has zero information content.
+
+    Beyond the absolute thresholds, IQR-based outlier detection is applied to
+    catch statistical extremes within the dataset: images with brightness or
+    std outside [Q1 − 1.5×IQR, Q3 + 1.5×IQR] are flagged as outliers.
+
+    Parameters
+    ----------
+    image_paths : np.ndarray
+        Array of Path objects pointing to PNG spectrogram files.
+    labels : np.ndarray
+        Corresponding integer labels (0 or 1).
+    remove : bool
+        If True (default), remove flagged images from the returned arrays.
+        If False, log them but keep them.
+
+    Returns
+    -------
+    image_paths, labels : (np.ndarray, np.ndarray)
+        Cleaned arrays (possibly shorter if remove=True).
+    """
+    logger.info("Running spectrogram outlier detection on %d images …", len(image_paths))
+
+    means = np.empty(len(image_paths), dtype=np.float32)
+    stds = np.empty(len(image_paths), dtype=np.float32)
+
+    from PIL import Image as PILImage
+
+    for i, path in enumerate(image_paths):
+        try:
+            arr = np.asarray(PILImage.open(path).convert("RGB"), dtype=np.float32)
+            means[i] = arr.mean()
+            stds[i] = arr.std()
+        except Exception:
+            means[i] = 0.0
+            stds[i] = 0.0
+
+    # Absolute thresholds for obviously corrupt renders
+    abs_mask = (means < 5.0) | (means > 250.0) | (stds < 2.0)
+
+    # IQR-based statistical outlier flags
+    def _iqr_outlier_mask(values: np.ndarray) -> np.ndarray:
+        q1, q3 = np.percentile(values, 25), np.percentile(values, 75)
+        iqr = q3 - q1
+        return (values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)
+
+    iqr_mask = _iqr_outlier_mask(means) | _iqr_outlier_mask(stds)
+    outlier_mask = abs_mask | iqr_mask
+
+    n_outliers = int(outlier_mask.sum())
+    if n_outliers > 0:
+        logger.warning(
+            "Outlier detection: found %d anomalous spectrograms out of %d "
+            "(%.1f%%) — %s.",
+            n_outliers,
+            len(image_paths),
+            100.0 * n_outliers / len(image_paths),
+            "removing" if remove else "flagging only (not removed)",
+        )
+        for path in image_paths[outlier_mask]:
+            logger.debug("  Outlier: %s", path)
+    else:
+        logger.info("Outlier detection: no anomalous spectrograms found.")
+
+    if remove and n_outliers > 0:
+        keep = ~outlier_mask
+        return image_paths[keep], labels[keep]
+
+    return image_paths, labels
 
 
 def _deduplicate_exact_images(

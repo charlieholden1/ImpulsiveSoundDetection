@@ -84,17 +84,24 @@ class StreamMonitor:
         min_retrigger_sec: float = config.MIN_RETRIGGER_SEC,
         max_queue_size: int = config.MAX_QUEUE_SIZE,
         node_id: str = config.NODE_ID,
+        baseline_percentile: int = config.ENERGY_BASELINE_PERCENTILE,
+        warmup_sec: float = config.STREAM_WARMUP_SEC,
     ) -> None:
         self.sample_rate = sample_rate
         self.frame_size = frame_size
         self.energy_multiplier = energy_multiplier
         self.min_retrigger_sec = min_retrigger_sec
         self._node_id = node_id
+        self._baseline_percentile = baseline_percentile
 
         # Number of RMS values to keep in the rolling window
         frames_per_sec = sample_rate / frame_size
         self._rolling_len = int(rolling_window_sec * frames_per_sec)
         self._rms_history: List[float] = []
+
+        # Warm-up: suppress triggers until the baseline has enough history
+        self._warmup_frames: int = int(warmup_sec * frames_per_sec)
+        self._frame_count: int = 0
 
         # Ring buffer for raw audio (to extract the ±0.975 s window)
         self._yamnet_half = config.YAMNET_WINDOW_SAMPLES // 2
@@ -113,10 +120,12 @@ class StreamMonitor:
 
         logger.info(
             "StreamMonitor ready  (frame=%d, rolling=%d frames, "
-            "multiplier=%.1f×, queue_max=%d)",
+            "multiplier=%.1f×, baseline=p%d, warmup=%d frames, queue_max=%d)",
             frame_size,
             self._rolling_len,
             energy_multiplier,
+            baseline_percentile,
+            self._warmup_frames,
             max_queue_size,
         )
 
@@ -138,17 +147,29 @@ class StreamMonitor:
         return float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
 
     def _rolling_mean(self) -> float:
-        """Return the rolling mean of RMS history.
+        """Return the rolling mean of RMS history."""
+        if not self._rms_history:
+            return 1e-8
+        return float(np.mean(self._rms_history[-self._rolling_len:]))
+
+    def _percentile_baseline(self) -> float:
+        """Return a high percentile of recent RMS history as the baseline.
+
+        Using the 90th percentile instead of the mean makes the threshold
+        more robust: transient loud non-gunshot sounds temporarily inflate
+        the mean and desensitise the trigger, whereas the percentile stays
+        closer to the true ambient noise floor.
 
         Returns
         -------
         float
-            Mean RMS over the history window, or ``1e-8`` if no
-            history yet (to avoid division by zero).
+            p-th percentile RMS over the history window, or ``1e-8`` if
+            fewer than two samples are available.
         """
-        if not self._rms_history:
+        history = self._rms_history[-self._rolling_len:]
+        if len(history) < 2:
             return 1e-8
-        return float(np.mean(self._rms_history[-self._rolling_len:]))
+        return float(np.percentile(history, self._baseline_percentile))
 
     def _write_ring(self, samples: np.ndarray) -> None:
         """Append *samples* to the internal ring buffer.
@@ -228,8 +249,8 @@ class StreamMonitor:
         while offset + self.frame_size <= len(chunk):
             frame = chunk[offset:offset + self.frame_size]
             rms = self._rms(frame)
-            baseline = self._rolling_mean()
             self._rms_history.append(rms)
+            self._frame_count += 1
 
             # Keep history bounded
             if len(self._rms_history) > self._rolling_len * 2:
@@ -237,6 +258,14 @@ class StreamMonitor:
 
             current_time = self._global_sample_idx / self.sample_rate
             is_trigger = False
+
+            # Suppress triggers during warm-up while the baseline settles
+            if self._frame_count <= self._warmup_frames:
+                self._global_sample_idx += self.frame_size
+                offset += self.frame_size
+                continue
+
+            baseline = self._percentile_baseline()
 
             if rms > self.energy_multiplier * baseline:
                 gap = current_time - self._last_trigger_time
@@ -303,6 +332,7 @@ class StreamMonitor:
         self._ring_write = 0
         self._global_sample_idx = 0
         self._last_trigger_time = -999.0
+        self._frame_count = 0
         while not self.trigger_queue.empty():
             try:
                 self.trigger_queue.get_nowait()

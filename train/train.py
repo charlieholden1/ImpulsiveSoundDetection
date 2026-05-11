@@ -19,6 +19,7 @@ import numpy as np
 import tensorflow as tf
 
 from .dataset import load_spectrogram_dataset
+from .evaluate import plot_training_history
 from .model import build_cnn_model, build_metrics, compile_model, unfreeze_top_layers
 
 # Configure logging
@@ -175,6 +176,98 @@ def train_stage_b(
     )
 
     logger.info("Stage B complete.")
+    return history
+
+
+def train_stage_c(
+    model: tf.keras.Model,
+    base_model: tf.keras.Model,
+    train_ds: tf.data.Dataset,
+    val_ds: tf.data.Dataset,
+    class_weights: dict,
+    epochs: int = 10,
+    learning_rate: float = 1e-6,
+    checkpoint_path: Path = Path("models/checkpoint_stage_c.keras"),
+) -> tf.keras.callbacks.History:
+    """
+    Stage C: Domain-adaptation fine-tune on mixed real+synthetic audio.
+
+    Unfreezes only the top 5 EfficientNetB0 layers (vs 20 in Stage B) with
+    a very conservative LR to avoid catastrophic forgetting of the synthetic
+    test-set performance while adapting to real-world audio.  Monitors
+    val_recall rather than val_auprc because recall is the primary metric
+    when adapting to real audio (precision is secondary in this domain).
+
+    Parameters
+    ----------
+    model : tf.keras.Model
+        Model to fine-tune (output of Stage A or B).
+    base_model : tf.keras.Model
+        The EfficientNetB0 sub-model, used to selectively unfreeze layers.
+    train_ds : tf.data.Dataset
+        Mixed real+synthetic training dataset.
+    val_ds : tf.data.Dataset
+        Validation dataset (VOICe source-domain segments rendered as images).
+    class_weights : dict
+        Class weights for imbalanced real-world data.
+    epochs : int
+        Maximum fine-tuning epochs.
+    learning_rate : float
+        Starting LR (default 1e-6 — much smaller than Stage B's 1e-5).
+    checkpoint_path : Path
+        Where to save the best Stage C checkpoint.
+
+    Returns
+    -------
+    tf.keras.callbacks.History
+    """
+    logger.info("=== STAGE C: Domain-Adaptation Fine-Tune (Real Audio) ===")
+    logger.info("Unfreezing top 5 layers, LR=%.0e, epochs=%d", learning_rate, epochs)
+
+    checkpoint_path = Path(checkpoint_path)
+
+    unfreeze_top_layers(base_model, num_layers=5)
+
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    loss = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+    metrics = build_metrics()
+    model.compile(optimizer=optimizer, loss=loss, metrics=metrics)
+
+    callbacks = [
+        tf.keras.callbacks.ModelCheckpoint(
+            str(checkpoint_path),
+            monitor="val_recall",
+            mode="max",
+            save_best_only=True,
+            verbose=1,
+        ),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_recall",
+            mode="max",
+            patience=4,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_recall",
+            mode="max",
+            factor=0.5,
+            patience=2,
+            min_lr=1e-8,
+            verbose=1,
+        ),
+    ]
+
+    history = model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=epochs,
+        class_weight=class_weights,
+        callbacks=callbacks,
+        verbose=1,
+    )
+
+    logger.info("Stage C complete.")
     return history
 
 
@@ -410,6 +503,7 @@ def main(
         stage_a_metrics["auprc"],
         stage_a_metrics["f1"],
     )
+    plot_training_history(history_a, output_dir, stage="A")
 
     stage_b_metrics = None
     if skip_stage_b or epochs_stage_b <= 0:
@@ -434,6 +528,7 @@ def main(
             stage_b_metrics["auprc"],
             stage_b_metrics["f1"],
         )
+        plot_training_history(history_b, output_dir, stage="B")
 
         selected_stage = "stage_b"
         selected_stage_metrics = stage_b_metrics

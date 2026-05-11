@@ -216,6 +216,7 @@ def discover_voice_dataset(
     positive_labels: frozenset = config.POSITIVE_LABELS,
     negative_labels: frozenset = config.NEGATIVE_LABELS,
     file_list: Optional[Path] = None,
+    fallback_annotation_dir: Optional[Path] = None,
 ) -> DatasetBundle:
     """Walk the VOICe dataset and return positive / negative segments.
 
@@ -224,13 +225,18 @@ def discover_voice_dataset(
     audio_dir : Path
         Directory containing ``.wav`` files.
     annotation_dir : Path
-        Directory containing matching ``.txt`` annotation files.
+        Primary directory for ``.txt`` annotation files.
     positive_labels : frozenset
         Labels that count as *suspicious* (e.g. ``gunshot``, ``glassbreak``).
     negative_labels : frozenset
         Labels that count as *non-suspicious* (e.g. ``babycry``).
     file_list : Path | None
         If provided, only process filenames listed in this text file.
+    fallback_annotation_dir : Path | None
+        If a file's annotation is missing from ``annotation_dir``, look here
+        instead.  Use this when ``annotation_dir`` is a partial corrected set
+        (e.g. ``clean/annotation_corrected``) and the original annotations
+        (``clean/annotation``) should cover the remaining files.
 
     Returns
     -------
@@ -239,6 +245,7 @@ def discover_voice_dataset(
     """
     audio_dir = Path(audio_dir)
     annotation_dir = Path(annotation_dir)
+    fallback = Path(fallback_annotation_dir) if fallback_annotation_dir else None
 
     # Determine which files to process
     if file_list and file_list.exists():
@@ -253,7 +260,14 @@ def discover_voice_dataset(
     bundle = DatasetBundle()
     for wav_name in wav_names:
         wav_path = audio_dir / wav_name
-        ann_path = annotation_dir / wav_name.replace(".wav", ".txt")
+        ann_name = wav_name.replace(".wav", ".txt")
+        ann_path = annotation_dir / ann_name
+
+        # Fall back to original annotation dir for files not in the primary dir
+        if not ann_path.exists() and fallback is not None:
+            fallback_path = fallback / ann_name
+            if fallback_path.exists():
+                ann_path = fallback_path
 
         if not wav_path.exists():
             logger.warning("Missing audio file: %s", wav_path)

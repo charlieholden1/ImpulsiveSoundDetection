@@ -345,6 +345,70 @@ def cross_validate(
     return cv_results
 
 
+def plot_training_history(
+    history: tf.keras.callbacks.History,
+    output_dir: Path,
+    stage: str = "A",
+) -> None:
+    """
+    Save training vs. validation curves from a Keras History object.
+
+    Generates three side-by-side subplots (Loss, AUC, Recall) per training
+    stage, saved as a single PNG.  These plots are essential for diagnosing
+    overfitting, underfitting, and learning-rate instability.
+
+    Parameters
+    ----------
+    history : tf.keras.callbacks.History
+        Return value of model.fit().
+    output_dir : Path
+        Directory where the plot will be saved.
+    stage : str
+        Label suffix for the output file (e.g. "A", "B", "C").
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    h = history.history
+    epochs = range(1, len(h.get("loss", [])) + 1)
+
+    # Determine which metric keys are present
+    metric_pairs = [
+        ("loss", "val_loss", "Loss", "Loss"),
+        ("auc", "val_auc", "AUC", "AUC (ROC)"),
+        ("auprc", "val_auprc", "AUPRC", "Area Under PR Curve"),
+        ("recall", "val_recall", "Recall", "Recall"),
+    ]
+    available = [(tk, vk, short, label) for tk, vk, short, label in metric_pairs
+                 if tk in h and vk in h]
+
+    if not available:
+        logger.warning("No recognisable metric keys found in history; skipping history plot.")
+        return
+
+    n_plots = len(available)
+    fig, axes = plt.subplots(1, n_plots, figsize=(5 * n_plots, 4))
+    if n_plots == 1:
+        axes = [axes]
+
+    for ax, (train_key, val_key, short, label) in zip(axes, available):
+        ax.plot(epochs, h[train_key], "b-o", markersize=4, label=f"Train {short}")
+        ax.plot(epochs, h[val_key], "r-o", markersize=4, label=f"Val {short}")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(label)
+        ax.set_title(f"Stage {stage} — {label}")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
+    fig.suptitle(f"Training History — Stage {stage}", fontsize=13, y=1.02)
+    fig.tight_layout()
+
+    out_path = output_dir / f"history_stage_{stage.lower()}.png"
+    plt.savefig(out_path, dpi=100, bbox_inches="tight")
+    logger.info("Saved training history plot: %s", out_path)
+    plt.close()
+
+
 def main(
     model_path: Path,
     dataset_dir: Path = Path(r"C:\Users\holde\Documents\MLProject\Gunshot Audio Spectrogram Dataset for Binary Class"),

@@ -40,7 +40,7 @@ from typing import Callable, List, Optional, Union
 import numpy as np
 
 from . import config
-from .classifier import ClassificationResult, YAMNetClassifier, CNNClassifier
+from .classifier import ClassificationResult, YAMNetClassifier, CNNClassifier, YAMNetHeadClassifier
 from .data_loader import load_wav
 from .event_logger import EventLogger
 from .stream_monitor import StreamMonitor, TriggerEvent
@@ -62,7 +62,8 @@ class DetectionPipeline:
     log_path : Path | None
         If given, each JSON detection line is appended to this file.
     classifier_mode : str
-        One of: "cnn", "yamnet", "ensemble". Ignored if classifier is provided.
+        One of: "cnn", "yamnet", "yamnet_head", "ensemble", "ensemble_head".
+        Ignored if classifier is provided.
     """
 
     def __init__(
@@ -87,14 +88,34 @@ class DetectionPipeline:
                     model_path=str(config.CNN_MODEL_PATH),
                     decision_threshold=config.CNN_DECISION_THRESHOLD,
                 )
+            elif mode == "yamnet_head":
+                logger.info("Using YAMNet embedding head classifier")
+                self.classifier = YAMNetHeadClassifier(
+                    head_model_path=str(config.YAMNET_HEAD_MODEL_PATH),
+                    decision_threshold=config.YAMNET_HEAD_DECISION_THRESHOLD,
+                )
             elif mode == "ensemble":
-                logger.info("Using ensemble classifier (CNN + YAMNet)")
+                logger.info("Using ensemble classifier (YAMNet + CNN, weighted)")
+                # YAMNet first so index 0 matches ENSEMBLE_WEIGHTS[0]
                 self.classifier = [
+                    YAMNetClassifier(),
                     CNNClassifier(
                         model_path=str(config.CNN_MODEL_PATH),
                         decision_threshold=config.CNN_DECISION_THRESHOLD,
                     ),
-                    YAMNetClassifier(),
+                ]
+            elif mode == "ensemble_head":
+                logger.info("Using ensemble classifier (YAMNet head + CNN, weighted)")
+                # YAMNet head first so index 0 matches ENSEMBLE_WEIGHTS[0]
+                self.classifier = [
+                    YAMNetHeadClassifier(
+                        head_model_path=str(config.YAMNET_HEAD_MODEL_PATH),
+                        decision_threshold=config.YAMNET_HEAD_DECISION_THRESHOLD,
+                    ),
+                    CNNClassifier(
+                        model_path=str(config.CNN_MODEL_PATH),
+                        decision_threshold=config.CNN_DECISION_THRESHOLD,
+                    ),
                 ]
             else:  # yamnet or default
                 logger.info("Using YAMNet classifier")
@@ -246,16 +267,38 @@ class DetectionPipeline:
                 )
                 for c in self.classifier
             ]
-            is_suspicious = all(r.is_suspicious for r in results)
+            # Weighted confidence: ENSEMBLE_WEIGHTS matches classifier order [YAMNet, CNN]
+            weights = config.ENSEMBLE_WEIGHTS
+            weighted_conf = sum(w * r.confidence for w, r in zip(weights, results))
+            is_suspicious = weighted_conf >= config.ENSEMBLE_THRESHOLD
+            # Primary result is from the highest-weight classifier (index 0 = YAMNet)
             result = results[0]
+            result.confidence = float(weighted_conf)
             result.is_suspicious = is_suspicious
             result.label = "GUNSHOT" if is_suspicious else "NOGUN"
-        else:
-            result = self.classifier.classify(
-                waveform=trigger.window,
-                timestamp=trigger.timestamp_sec,
-                onset_index=trigger.onset_index,
+            result.severity = (
+                "HIGH" if weighted_conf >= 0.85
+                else "MEDIUM" if weighted_conf >= 0.60
+                else "LOW"
             )
+            logger.debug(
+                "Ensemble: YAMNet=%.3f CNN=%.3f → weighted=%.3f suspicious=%s",
+                results[0].confidence, results[1].confidence,
+                weighted_conf, is_suspicious,
+            )
+        else:
+            # Single classifier (CNN or YAMNet)
+            if (
+                config.SLIDING_WINDOW_INFERENCE
+                and isinstance(self.classifier, YAMNetHeadClassifier)
+            ):
+                result = self._sliding_window_classify(trigger)
+            else:
+                result = self.classifier.classify(
+                    waveform=trigger.window,
+                    timestamp=trigger.timestamp_sec,
+                    onset_index=trigger.onset_index,
+                )
 
         # Propagate the precise onset wall-clock time from Stage 1
         result.wall_clock_time = trigger.wall_clock_time
@@ -269,6 +312,59 @@ class DetectionPipeline:
                 config.INFERENCE_TIMEOUT_SEC,
             )
         return result
+
+    def _sliding_window_classify(self, trigger: TriggerEvent) -> ClassificationResult:
+        """Run YAMNet Head on three overlapping windows and return the max-confidence result.
+
+        The RMS trigger may fire slightly before or after the actual gunshot onset.
+        Running inference on windows shifted ±SLIDING_WINDOW_SHIFT_SEC compensates
+        for this misalignment without requiring any change to Stage 1.
+        """
+        sr = config.SAMPLE_RATE
+        shift = int(config.SLIDING_WINDOW_SHIFT_SEC * sr)
+        win_len = config.YAMNET_WINDOW_SAMPLES
+
+        # Pad the original window with silence on both sides so shifts stay in bounds
+        padded = np.pad(trigger.window, (shift, shift))
+
+        # Three views of the padded buffer
+        windows = [
+            padded[:win_len],               # left-shifted: earlier in time
+            padded[shift: shift + win_len], # centred: original alignment
+            padded[shift * 2:],             # right-shifted: later in time
+        ]
+        # Clamp to window length (right-shifted may be slightly short)
+        windows = [
+            np.pad(w, (0, max(0, win_len - len(w))))[:win_len]
+            for w in windows
+        ]
+
+        best: Optional[ClassificationResult] = None
+        for w in windows:
+            try:
+                r = self.classifier.classify(
+                    waveform=w,
+                    timestamp=trigger.timestamp_sec,
+                    onset_index=trigger.onset_index,
+                )
+                if best is None or r.confidence > best.confidence:
+                    best = r
+            except Exception as exc:
+                logger.warning("Sliding-window inference failed: %s", exc)
+
+        if best is None:
+            # Fallback: run on original window (should never happen)
+            best = self.classifier.classify(
+                waveform=trigger.window,
+                timestamp=trigger.timestamp_sec,
+                onset_index=trigger.onset_index,
+            )
+
+        logger.debug(
+            "Sliding-window: best confidence=%.3f  suspicious=%s",
+            best.confidence, best.is_suspicious,
+        )
+        return best
 
     def _drain_queue(self) -> None:
         """Process any remaining triggers still sitting in the queue.

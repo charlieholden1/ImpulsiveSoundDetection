@@ -20,8 +20,9 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import List, Optional
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import List, Optional
 
 import time
 
@@ -322,6 +323,11 @@ class CNNClassifier:
         Path to the .keras model file.
     decision_threshold : float
         Sigmoid threshold for binary decision (default 0.5).
+    calibration_path : str | None
+        Optional path to a JSON file with Platt scaling parameters
+        ({"coef": float, "intercept": float}).  When provided, raw logits
+        are mapped through the calibration transform before the threshold
+        is applied, producing calibrated probabilities.
     """
 
     def __init__(
@@ -330,17 +336,36 @@ class CNNClassifier:
         decision_threshold: float = 0.5,
         feature_type: str = None,
         node_id: str = config.NODE_ID,
+        calibration_path: str = None,
     ) -> None:
         self._model_path = model_path or str(config.CNN_MODEL_PATH)
         self._decision_threshold = decision_threshold
         self._feature_type = feature_type or config.CNN_FEATURE_TYPE
         self._node_id = node_id
         self._model = None
+
+        # Load Platt scaling parameters if a calibration file is provided or configured
+        cal_path = Path(calibration_path or str(config.CNN_CALIBRATION_PATH))
+        if cal_path.exists():
+            with open(cal_path, "r", encoding="utf-8") as f:
+                self._calibration = json.load(f)
+            logger.info(
+                "CNN Classifier: loaded calibration params from %s (coef=%.4f, intercept=%.4f)",
+                cal_path,
+                self._calibration.get("coef", 1.0),
+                self._calibration.get("intercept", 0.0),
+            )
+        else:
+            self._calibration = None
+            if calibration_path:
+                logger.warning("Calibration file not found: %s — using raw sigmoid", cal_path)
+
         logger.info(
-            "CNN Classifier initialized. Model path: %s, Feature: %s, Threshold: %.2f",
+            "CNN Classifier initialized. Model path: %s, Feature: %s, Threshold: %.2f, Calibrated: %s",
             self._model_path,
             self._feature_type,
             decision_threshold,
+            self._calibration is not None,
         )
 
     def _ensure_model(self) -> None:
@@ -399,8 +424,13 @@ class CNNClassifier:
             logger.error("Model inference failed: %s", exc)
             raise RuntimeError(f"Model inference failed: {exc}") from exc
 
-        # CRITICAL FIX: Model outputs raw LOGITS, must apply sigmoid to get probability [0, 1]
-        sigmoid_output = 1.0 / (1.0 + np.exp(-logit))
+        # Apply Platt scaling calibration if available, otherwise use raw sigmoid
+        if self._calibration is not None:
+            coef = self._calibration["coef"]
+            intercept = self._calibration["intercept"]
+            sigmoid_output = 1.0 / (1.0 + np.exp(-(coef * logit + intercept)))
+        else:
+            sigmoid_output = 1.0 / (1.0 + np.exp(-logit))
 
         # Apply threshold
         is_suspicious = sigmoid_output >= self._decision_threshold
@@ -427,4 +457,95 @@ class CNNClassifier:
             is_suspicious,
         )
 
+        return result
+
+
+# ──────────────────────────────────────────────────────────────────────
+# YAMNet embedding head classifier
+# ──────────────────────────────────────────────────────────────────────
+class YAMNetHeadClassifier:
+    """Classifier that runs YAMNet embeddings through a trained binary head.
+
+    Unlike YAMNetClassifier (which uses a hand-curated suspicious-label list)
+    this class uses a custom head trained on real gunshot audio, giving a
+    learned decision boundary on YAMNet's 1024-d embedding space.
+
+    Parameters
+    ----------
+    head_model_path : str
+        Path to the trained head .keras file
+        (output of train/train_yamnet_head.py).
+    yamnet_handle : str
+        TF-Hub URL for the YAMNet model.
+    decision_threshold : float
+        Sigmoid threshold for the binary decision.
+    """
+
+    def __init__(
+        self,
+        head_model_path: str = None,
+        yamnet_handle: str = config.YAMNET_MODEL_HANDLE,
+        decision_threshold: float = 0.50,
+    ) -> None:
+        self._head_path = head_model_path or str(config.YAMNET_HEAD_MODEL_PATH)
+        self._yamnet_handle = yamnet_handle
+        self._decision_threshold = decision_threshold
+        self._yamnet = None
+        self._head = None
+
+    def _ensure_models(self) -> None:
+        if self._yamnet is not None:
+            return
+        logger.info("Loading YAMNet from %s …", self._yamnet_handle)
+        self._yamnet = hub.load(self._yamnet_handle)
+        logger.info("Loading YAMNet head from %s …", self._head_path)
+        self._head = tf.keras.models.load_model(self._head_path)
+        logger.info("YAMNetHeadClassifier ready.")
+
+    def classify(
+        self,
+        waveform: np.ndarray,
+        timestamp: float = 0.0,
+        onset_index: int = 0,
+    ) -> ClassificationResult:
+        """Run inference using YAMNet embeddings + trained head.
+
+        Parameters
+        ----------
+        waveform : np.ndarray
+            1-D float32 array at 16 kHz.
+        timestamp : float
+            Playback timestamp (seconds).
+        onset_index : int
+            Absolute sample index of the trigger.
+
+        Returns
+        -------
+        ClassificationResult
+        """
+        self._ensure_models()
+
+        waveform = waveform.astype(np.float32)
+        _, embeddings, _ = self._yamnet(waveform)
+        # Average over time frames → fixed 1024-d vector
+        pooled = np.mean(embeddings.numpy(), axis=0, keepdims=True).astype(np.float32)
+
+        logit = float(np.asarray(self._head.predict_on_batch(pooled)).reshape(-1)[0])
+        sigmoid_output = float(1.0 / (1.0 + np.exp(-logit)))
+
+        is_suspicious = sigmoid_output >= self._decision_threshold
+        label = "GUNSHOT" if is_suspicious else "NOGUN"
+
+        result = ClassificationResult(
+            timestamp=round(timestamp, 4),
+            onset_index=onset_index,
+            label=label,
+            confidence=sigmoid_output,
+            is_suspicious=bool(is_suspicious),
+            top_k=[{"class": label, "score": sigmoid_output}],
+        )
+        logger.info(
+            "t=%.3f s  →  %s (%.4f)  suspicious=%s  [YAMNetHead]",
+            timestamp, label, sigmoid_output, is_suspicious,
+        )
         return result

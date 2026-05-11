@@ -14,7 +14,7 @@ from pathlib import Path
 #    Training / dataset paths (development machine).
 #    On deployed RPi nodes these are not used at runtime.
 # ──────────────────────────────────────────────────────────────────────
-ISD_ROOT: Path = Path(r"C:\ImpulsiveSoundDetection")
+ISD_ROOT: Path = Path(r"C:\Users\holde\Documents\MLProject")
 
 GUNSHOT_SPECTROGRAM_DIR: Path = (
     ISD_ROOT / "Gunshot Audio Spectrogram Dataset for Binary Class"
@@ -70,7 +70,8 @@ SUSPICIOUS_LABELS: frozenset = frozenset({
 # ──────────────────────────────────────────────────────────────────────
 # 5. VOICE DATASET LABEL MAPPING
 # ──────────────────────────────────────────────────────────────────────
-POSITIVE_LABELS: frozenset = frozenset({"gunshot", "glassbreak"})
+# Labels present in the VOICe annotation files
+POSITIVE_LABELS: frozenset = frozenset({"gunshot"})
 NEGATIVE_LABELS: frozenset = frozenset({"babycry"})
 
 # ──────────────────────────────────────────────────────────────────────
@@ -93,13 +94,14 @@ INFERENCE_TIMEOUT_SEC: float = 5.0  # per-window inference budget
 # 8. CNN CLASSIFIER (STAGE 2 ALTERNATIVE)
 #    Model path is relative to ISD_ROOT so it works on any machine.
 # ──────────────────────────────────────────────────────────────────────
+# FFT model is the best-performing feature type (98.8% F1, threshold 0.65)
 CNN_MODEL_PATH: Path = (
-    ISD_ROOT / "models" / "feature_sweep_stagea6" / "logmel"
+    ISD_ROOT / "models" / "feature_sweep_stagea6" / "fft"
     / "cnn_gunshot_classifier.keras"
 )
-CNN_FEATURE_TYPE: str = "LogMel"
-CNN_DECISION_THRESHOLD: float = 0.15
-CLASSIFIER_MODE: str = "yamnet"     # Options: "cnn", "yamnet", "ensemble"
+CNN_FEATURE_TYPE: str = "FFT"
+CNN_DECISION_THRESHOLD: float = 0.65
+CLASSIFIER_MODE: str = "yamnet"  # Options: "cnn", "yamnet", "yamnet_head", "ensemble", "ensemble_head"
 
 # ──────────────────────────────────────────────────────────────────────
 # 9. DATABASE / LOG PATHS
@@ -139,3 +141,67 @@ MQTT_RMS_PUBLISH_EVERY_N_FRAMES: int = 6
 # ──────────────────────────────────────────────────────────────────────
 LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
 LOG_DATE_FORMAT: str = "%Y-%m-%dT%H:%M:%S"
+
+# ──────────────────────────────────────────────────────────────────────
+# 11. ENSEMBLE (P3) – confidence-weighted voting
+# ──────────────────────────────────────────────────────────────────────
+# Weights correspond to [YAMNet, CNN] — the order classifiers are listed
+# in ensemble mode.  Derived from real-world balanced accuracy:
+# YAMNet ~0.85 vs CNN ~0.56 on ReaLISED/VOICe audio.
+ENSEMBLE_WEIGHTS: list = [0.65, 0.35]   # [YAMNet weight, CNN weight]
+ENSEMBLE_THRESHOLD: float = 0.50        # weighted-confidence decision boundary
+
+# ──────────────────────────────────────────────────────────────────────
+# 12. ADAPTIVE STAGE 1 THRESHOLD (P5)
+# ──────────────────────────────────────────────────────────────────────
+# Use the 90th-percentile of recent RMS history as the baseline instead
+# of the mean — more robust when transient loud sounds inflate the mean.
+ENERGY_BASELINE_PERCENTILE: int = 90
+# Skip triggering during the first N seconds while the rolling baseline
+# accumulates enough history to be reliable.
+STREAM_WARMUP_SEC: float = 5.0
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. REAL-WORLD FINE-TUNING (P1)
+# ──────────────────────────────────────────────────────────────────────
+REALISED_DATA_DIR: Path = Path(
+    r"C:\Users\holde\Documents\MLProject\external_data\ReaLISED"
+)
+FINETUNED_MODEL_PATH: Path = Path(
+    r"C:\Users\holde\Documents\MLProject\models\finetuned_realworld\cnn_gunshot_classifier.keras"
+)
+REALWORLD_FINETUNE_LR: float = 1e-6
+REALWORLD_FINETUNE_EPOCHS: int = 10
+KAGGLE_SAMPLE_FRACTION: float = 0.30   # fraction of synthetic PNGs to mix in
+
+# ──────────────────────────────────────────────────────────────────────
+# 14. PROBABILITY CALIBRATION (P4)
+# ──────────────────────────────────────────────────────────────────────
+CNN_CALIBRATION_PATH: Path = Path(
+    r"C:\Users\holde\Documents\MLProject\models\calibration_params.json"
+)
+
+# ──────────────────────────────────────────────────────────────────────
+# 15. YAMNET EMBEDDING HEAD (P2)
+# ──────────────────────────────────────────────────────────────────────
+YAMNET_HEAD_MODEL_PATH: Path = Path(
+    r"C:\Users\holde\Documents\MLProject\models\yamnet_head\yamnet_head_classifier.keras"
+)
+YAMNET_HEAD_DECISION_THRESHOLD: float = 0.45
+
+# ──────────────────────────────────────────────────────────────────────
+# 16. ACTIVE-LEARNING ANNOTATION TOOL (train/annotate_audio.py)
+# ──────────────────────────────────────────────────────────────────────
+# Output directory for corrected VOICe annotations produced by the tool.
+ANNOTATION_CORRECTED_DIR: Path = VOICE_DATASET_DIR / "annotation_corrected"
+
+# ──────────────────────────────────────────────────────────────────────
+# 17. SLIDING-WINDOW INFERENCE (pipeline.py)
+# ──────────────────────────────────────────────────────────────────────
+# When True, each YAMNet Head trigger runs inference on the original
+# window plus two shifted copies (±0.2 s).  The maximum confidence
+# across all three is used for the final decision.  This catches cases
+# where the RMS trigger slightly misses the gunshot onset.
+# Adds ~2 × inference latency per trigger — keep False on slow hardware.
+SLIDING_WINDOW_INFERENCE: bool = True
+SLIDING_WINDOW_SHIFT_SEC: float = 0.20   # shift amount for each side window

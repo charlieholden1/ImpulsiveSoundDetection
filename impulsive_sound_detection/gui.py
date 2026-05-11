@@ -16,7 +16,12 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from . import config
-from .classifier import CNNClassifier, ClassificationResult, YAMNetClassifier
+from .classifier import (
+    CNNClassifier,
+    ClassificationResult,
+    YAMNetClassifier,
+    YAMNetHeadClassifier,
+)
 from .data_loader import load_wav
 from .stream_monitor import StreamMonitor
 
@@ -105,6 +110,15 @@ class DetectionGUI(ctk.CTk):
         self._last_result: Optional[ClassificationResult] = None
         self._metric_labels: Dict[str, ctk.CTkLabel] = {}
 
+        # Manual accuracy-testing state
+        self._user_marks: List[float] = []
+        self._detection_timestamps: List[float] = []
+
+        # Waveform sync view (file playback mode)
+        self._waveform_mode: bool = False
+        self._playhead_line = None
+        self._det_lines: list = []
+
         self.grid_columnconfigure(0, minsize=320)
         self.grid_columnconfigure(1, weight=1)
         self.grid_columnconfigure(2, minsize=320)
@@ -114,6 +128,8 @@ class DetectionGUI(ctk.CTk):
         self._build_main()
         self._build_inspector()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<m>", lambda e: self._on_mark_gunshot())
+        self.bind("<M>", lambda e: self._on_mark_gunshot())
         self._set_status("Idle", MUTED)
         self._set_metric("alerts", "0")
         self._set_metric("suspicious", "0")
@@ -198,7 +214,7 @@ class DetectionGUI(ctk.CTk):
         self._classifier_menu = ctk.CTkOptionMenu(
             controls,
             variable=self._classifier_var,
-            values=["cnn", "yamnet", "ensemble"],
+            values=["cnn", "yamnet", "yamnet_head", "ensemble", "ensemble_head"],
             fg_color=PANEL_ALT,
             button_color=PANEL_ALT,
             button_hover_color="#1D2942",
@@ -231,7 +247,7 @@ class DetectionGUI(ctk.CTk):
         self._dead_label = ctk.CTkLabel(tuning, text="", text_color=TEXT)
         self._slider_block(tuning, 0, "Trigger multiplier", self._mult_label)
         self._mult_slider = ctk.CTkSlider(
-            tuning, from_=1.5, to=10.0, number_of_steps=85,
+            tuning, from_=0.5, to=10.0, number_of_steps=95,
             variable=self._mult_var, progress_color=ACCENT_2,
             button_color=ACCENT, button_hover_color="#6A9EFF",
             command=self._on_mult_changed,
@@ -244,7 +260,23 @@ class DetectionGUI(ctk.CTk):
             button_color=ACCENT, button_hover_color="#6A9EFF",
             command=self._on_dead_changed,
         )
-        self._dead_slider.grid(row=5, column=0, sticky="ew", padx=16, pady=(4, 14))
+        self._dead_slider.grid(row=5, column=0, sticky="ew", padx=16, pady=(4, 8))
+        ctk.CTkFrame(tuning, fg_color=BORDER, height=1).grid(
+            row=6, column=0, sticky="ew", padx=16, pady=(4, 4)
+        )
+        self._bypass_var = tk.BooleanVar(value=False)
+        self._bypass_check = ctk.CTkCheckBox(
+            tuning,
+            text="Bypass Stage 1  (classify all windows)",
+            variable=self._bypass_var,
+            command=self._on_bypass_changed,
+            text_color=TEXT,
+            fg_color=ACCENT,
+            hover_color="#6A9EFF",
+            checkmark_color="#08101E",
+            font=ctk.CTkFont(family="Segoe UI", size=13),
+        )
+        self._bypass_check.grid(row=7, column=0, sticky="w", padx=16, pady=(0, 14))
         self._on_mult_changed(self._mult_var.get())
         self._on_dead_changed(self._dead_var.get())
 
@@ -278,7 +310,26 @@ class DetectionGUI(ctk.CTk):
             transport, text="00:00 / 00:00", text_color=MUTED,
             font=ctk.CTkFont(family="Cascadia Code", size=12),
         )
-        self._transport_value.grid(row=3, column=0, sticky="w", padx=16, pady=(8, 16))
+        self._transport_value.grid(row=3, column=0, sticky="w", padx=16, pady=(8, 6))
+        self._mark_btn = ctk.CTkButton(
+            transport,
+            text="▶  Mark Gunshot  [M]",
+            fg_color="#7B2FBE",
+            hover_color="#9B4FDE",
+            text_color=TEXT,
+            state="disabled",
+            height=38,
+            font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+            command=self._on_mark_gunshot,
+        )
+        self._mark_btn.grid(row=4, column=0, sticky="ew", padx=16, pady=(4, 4))
+        self._marks_label = ctk.CTkLabel(
+            transport,
+            text="Marks: 0  |  Press M during file playback",
+            text_color=MUTED,
+            font=ctk.CTkFont(family="Cascadia Code", size=11),
+        )
+        self._marks_label.grid(row=5, column=0, sticky="w", padx=16, pady=(0, 14))
         self._on_source_changed("Live")
 
     def _slider_block(self, parent, row: int, title: str, value_label) -> None:
@@ -330,10 +381,11 @@ class DetectionGUI(ctk.CTk):
         plot_panel.grid(row=2, column=0, sticky="nsew", pady=(0, 14))
         plot_panel.grid_columnconfigure(0, weight=1)
         plot_panel.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(
+        self._plot_title_label = ctk.CTkLabel(
             plot_panel, text="Energy timeline", text_color=TEXT,
             font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"),
-        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
+        )
+        self._plot_title_label.grid(row=0, column=0, sticky="w", padx=18, pady=(16, 8))
         self._fig = Figure(figsize=(11, 4.2), dpi=100, facecolor=PANEL)
         self._ax = self._fig.add_subplot(111)
         self._setup_plot()
@@ -478,6 +530,26 @@ class DetectionGUI(ctk.CTk):
     def _build_classifier(self) -> object:
         mode = self._classifier_var.get()
         self._set_metric("classifier", mode.upper())
+
+        def build_yamnet_family(*, prefer_head: bool) -> object:
+            if prefer_head:
+                head_path = Path(config.YAMNET_HEAD_MODEL_PATH)
+                if head_path.exists():
+                    model = YAMNetHeadClassifier(
+                        head_model_path=str(head_path),
+                        decision_threshold=config.YAMNET_HEAD_DECISION_THRESHOLD,
+                    )
+                    model._ensure_models()
+                    return model
+                self._log_system(
+                    "YAMNet head model not found; falling back to regular YAMNet. "
+                    "Train it with: python -m train.train_yamnet_head"
+                )
+
+            model = YAMNetClassifier()
+            model._ensure_model()
+            return model
+
         if mode == "cnn":
             model = CNNClassifier(
                 model_path=str(config.CNN_MODEL_PATH),
@@ -487,19 +559,24 @@ class DetectionGUI(ctk.CTk):
             model._ensure_model()
             return model
         if mode == "yamnet":
-            model = YAMNetClassifier()
-            model._ensure_model()
-            return model
+            return build_yamnet_family(prefer_head=False)
+        if mode == "yamnet_head":
+            return build_yamnet_family(prefer_head=True)
 
+        if mode == "ensemble_head":
+            yamnet_model = build_yamnet_family(prefer_head=True)
+        else:
+            yamnet_model = build_yamnet_family(prefer_head=False)
         cnn = CNNClassifier(
             model_path=str(config.CNN_MODEL_PATH),
             decision_threshold=config.CNN_DECISION_THRESHOLD,
             feature_type=config.CNN_FEATURE_TYPE,
         )
-        yamnet = YAMNetClassifier()
+        # Keep the YAMNet-family classifier first so ENSEMBLE_WEIGHTS maps to
+        # [YAMNet/YAMNet-head, CNN], matching the non-GUI pipeline.
+        yamnet = yamnet_model
         cnn._ensure_model()
-        yamnet._ensure_model()
-        return [cnn, yamnet]
+        return [yamnet, cnn]
 
     def _on_start(self) -> None:
         if self._is_streaming:
@@ -606,6 +683,8 @@ class DetectionGUI(ctk.CTk):
         entry_state = "disabled" if running else "normal"
         self._file_entry.configure(state=entry_state)
         self._file_button.configure(state=entry_state)
+        mark_state = "normal" if (running and self._source_var.get() == "File") else "disabled"
+        self._mark_btn.configure(state=mark_state)
 
     def _reset_runtime(self) -> None:
         self._rms_buf.clear()
@@ -618,6 +697,18 @@ class DetectionGUI(ctk.CTk):
         self._total_alerts = 0
         self._suspicious_alerts = 0
         self._last_result = None
+        self._user_marks.clear()
+        self._detection_timestamps.clear()
+        self._marks_label.configure(text="Marks: 0  |  Press M during file playback")
+        if self._waveform_mode:
+            self._waveform_mode = False
+            self._playhead_line = None
+            self._det_lines.clear()
+            self._ax.cla()
+            self._setup_plot()
+            self._plot_title_label.configure(text="Energy timeline")
+            self._canvas.draw_idle()
+        self._det_lines.clear()
         self._set_metric("alerts", "0")
         self._set_metric("suspicious", "0")
         self._latest_badge.configure(text="NO DETECTION", fg_color=PANEL_ALT, text_color=TEXT)
@@ -646,10 +737,47 @@ class DetectionGUI(ctk.CTk):
             logger.warning("sounddevice status: %s", status)
         self._feed_and_record(indata[:, 0].astype(np.float32))
 
+    def _setup_file_waveform_plot(self, waveform: np.ndarray, sr: int) -> None:
+        """Replace the rolling energy plot with a full-file waveform + playhead."""
+        self._ax.cla()
+        self._ax.set_facecolor(PANEL_ALT)
+        for spine in self._ax.spines.values():
+            spine.set_color(BORDER)
+        self._ax.tick_params(colors=MUTED, labelsize=9)
+        self._ax.set_xlabel("Time (s)", color=TEXT)
+        self._ax.set_ylabel("Amplitude", color=TEXT)
+        self._ax.grid(color="#20304A", alpha=0.45, linewidth=0.8)
+
+        # Downsample to ~5000 points so the plot stays fast
+        n_pts = 5000
+        step = max(1, len(waveform) // n_pts)
+        t_ds = np.arange(0, len(waveform), step) / float(sr)
+        wav_ds = waveform[::step]
+
+        duration = len(waveform) / float(sr)
+        self._ax.set_xlim(0, duration)
+        peak = float(np.max(np.abs(wav_ds))) if len(wav_ds) else 0.05
+        self._ax.set_ylim(-max(peak * 1.15, 0.05), max(peak * 1.15, 0.05))
+        self._ax.plot(t_ds, wav_ds, color=RMS, linewidth=0.5, alpha=0.85)
+
+        # Moving playhead cursor
+        self._playhead_line = self._ax.axvline(
+            0, color=DANGER, linewidth=2.2, alpha=0.9, zorder=6, label="Playhead"
+        )
+
+        self._det_lines.clear()
+        self._fig.tight_layout()
+        self._canvas.draw_idle()
+        self._waveform_mode = True
+        self._plot_title_label.configure(text="Waveform + Detections  (red = suspicious · green = clear)")
+
     def _start_wav_playback(self, wav_path: Path) -> None:
         waveform, sr = load_wav(wav_path)
         self._source_duration_sec = len(waveform) / float(sr)
         self._source_position_sec = 0.0
+
+        # Switch the main plot to synchronized waveform view
+        self._setup_file_waveform_plot(waveform, sr)
 
         if sd is not None:
             try:
@@ -692,6 +820,8 @@ class DetectionGUI(ctk.CTk):
         self._source_position_sec = self._source_duration_sec
         if self._is_streaming:
             self.after(100, self._on_stop)
+            if self._user_marks:
+                self.after(800, self._show_accuracy_report)
 
     def _feed_and_record(self, chunk: np.ndarray) -> None:
         if self._monitor is None:
@@ -699,7 +829,7 @@ class DetectionGUI(ctk.CTk):
 
         self._monitor.feed(chunk)
         rms = self._monitor._rms_history[-1] if self._monitor._rms_history else 0.0
-        baseline = self._monitor._rolling_mean()
+        baseline = self._monitor._percentile_baseline()
         threshold = baseline * self._monitor.energy_multiplier
         elapsed = time.monotonic() - self._stream_start if self._stream_start else 0.0
 
@@ -722,9 +852,16 @@ class DetectionGUI(ctk.CTk):
                 )
                 for model in self._classifier
             ]
-            primary = results[0]
-            primary.is_suspicious = all(result.is_suspicious for result in results)
-            primary.confidence = float(np.mean([result.confidence for result in results]))
+            # _build_classifier returns [YAMNet-family, CNN], matching config's
+            # ensemble weights.
+            yamnet_result, cnn_result = results
+            weighted_conf = sum(
+                weight * result.confidence
+                for weight, result in zip(config.ENSEMBLE_WEIGHTS, results)
+            )
+            primary = yamnet_result
+            primary.is_suspicious = weighted_conf >= config.ENSEMBLE_THRESHOLD
+            primary.confidence = float(weighted_conf)
             primary.label = "GUNSHOT" if primary.is_suspicious else "NOGUN"
             if primary.confidence >= 0.85:
                 primary.severity = "HIGH"
@@ -732,6 +869,11 @@ class DetectionGUI(ctk.CTk):
                 primary.severity = "MEDIUM"
             else:
                 primary.severity = "LOW"
+            primary.top_k = [
+                {"class": "Ensemble weighted", "score": float(weighted_conf)},
+                {"class": "YAMNet score", "score": float(yamnet_result.confidence)},
+                {"class": "CNN score", "score": float(cnn_result.confidence)},
+            ]
             return primary
 
         return self._classifier.classify(
@@ -770,6 +912,7 @@ class DetectionGUI(ctk.CTk):
         self._total_alerts += 1
         if result.is_suspicious:
             self._suspicious_alerts += 1
+            self._detection_timestamps.append(result.timestamp)
 
         self._set_metric("alerts", str(self._total_alerts))
         self._set_metric("suspicious", str(self._suspicious_alerts))
@@ -804,6 +947,28 @@ class DetectionGUI(ctk.CTk):
             self._topk_box.insert("end", "\n".join(lines))
         else:
             self._topk_box.insert("end", "No alternate class scores available.")
+
+        # Draw a vertical detection line on the waveform (file mode only)
+        if self._waveform_mode:
+            color = DANGER if result.is_suspicious else SAFE
+            lw = 2.0 if result.is_suspicious else 1.2
+            ls = "-" if result.is_suspicious else "--"
+            line = self._ax.axvline(
+                result.timestamp, color=color, linewidth=lw,
+                linestyle=ls, alpha=0.85, zorder=5,
+            )
+            # Small label above the line
+            ylim = self._ax.get_ylim()
+            label_y = ylim[1] * 0.88
+            self._ax.text(
+                result.timestamp, label_y,
+                f"{'⚠' if result.is_suspicious else '✓'} {result.confidence:.2f}",
+                color=color, fontsize=7.5, ha="center", va="top",
+                bbox=dict(boxstyle="round,pad=0.15", fc=PANEL, ec=color, alpha=0.85),
+                zorder=6,
+            )
+            self._det_lines.append(line)
+            self._canvas.draw_idle()
 
         self._log_result(result)
         if self._log_path:
@@ -871,29 +1036,37 @@ class DetectionGUI(ctk.CTk):
         if not self._is_streaming:
             return
 
-        if self._time_buf:
-            self._rms_line.set_data(self._time_buf, self._rms_buf)
-            self._thr_line.set_data(self._time_buf, self._thr_buf)
-
-            current_max = self._time_buf[-1]
-            x_min = max(0.0, current_max - PLOT_HISTORY_SEC)
-            self._ax.set_xlim(x_min, x_min + PLOT_HISTORY_SEC)
-
-            visible = [
-                value
-                for time_list, value_list in ((self._time_buf, self._rms_buf), (self._time_buf, self._thr_buf))
-                for time_value, value in zip(time_list, value_list)
-                if time_value >= x_min
-            ]
-            self._ax.set_ylim(0, max((max(visible) * 1.25) if visible else 0.05, 0.01))
-
-            markers = [
-                (time_value, level)
-                for time_value, level in zip(self._marker_times, self._marker_levels)
-                if time_value >= x_min
-            ]
-            self._markers.set_offsets(np.array(markers) if markers else np.empty((0, 2)))
+        if self._waveform_mode:
+            # Waveform sync view: just move the playhead cursor
+            if self._playhead_line is not None:
+                pos = self._source_position_sec
+                self._playhead_line.set_xdata([pos, pos])
             self._canvas.draw_idle()
+        else:
+            # Rolling energy timeline (live mic or energy-only view)
+            if self._time_buf:
+                self._rms_line.set_data(self._time_buf, self._rms_buf)
+                self._thr_line.set_data(self._time_buf, self._thr_buf)
+
+                current_max = self._time_buf[-1]
+                x_min = max(0.0, current_max - PLOT_HISTORY_SEC)
+                self._ax.set_xlim(x_min, x_min + PLOT_HISTORY_SEC)
+
+                visible = [
+                    value
+                    for time_list, value_list in ((self._time_buf, self._rms_buf), (self._time_buf, self._thr_buf))
+                    for time_value, value in zip(time_list, value_list)
+                    if time_value >= x_min
+                ]
+                self._ax.set_ylim(0, max((max(visible) * 1.25) if visible else 0.05, 0.01))
+
+                markers = [
+                    (time_value, level)
+                    for time_value, level in zip(self._marker_times, self._marker_levels)
+                    if time_value >= x_min
+                ]
+                self._markers.set_offsets(np.array(markers) if markers else np.empty((0, 2)))
+                self._canvas.draw_idle()
 
         if self._last_result is None:
             self._set_status("Armed", SAFE)
@@ -907,6 +1080,95 @@ class DetectionGUI(ctk.CTk):
 
     def _clear_activity(self) -> None:
         self._activity_box.delete("1.0", "end")
+
+    def _on_bypass_changed(self) -> None:
+        bypass = self._bypass_var.get()
+        if bypass:
+            self._mult_slider.configure(state="disabled")
+            if self._monitor is not None:
+                self._monitor.energy_multiplier = 0.01
+            self._log_system(
+                "Stage 1 bypass ON — every window sent to classifier (~1 per dead-time interval)."
+            )
+        else:
+            self._mult_slider.configure(state="normal")
+            restored = self._mult_var.get()
+            if self._monitor is not None:
+                self._monitor.energy_multiplier = restored
+            self._log_system(f"Stage 1 bypass OFF — energy trigger restored to {restored:.1f}x.")
+
+    def _on_mark_gunshot(self) -> None:
+        if not self._is_streaming or self._source_var.get() != "File":
+            return
+        ts = self._source_position_sec
+        self._user_marks.append(ts)
+        n = len(self._user_marks)
+        self._marks_label.configure(text=f"Marks: {n}  |  Last at {ts:.2f}s")
+        self._log_system(f"[MARK] Gunshot marked at {ts:.3f}s  ({n} total)")
+        self._mark_btn.configure(fg_color=DANGER)
+        self.after(220, lambda: self._mark_btn.configure(fg_color="#7B2FBE"))
+
+    def _show_accuracy_report(self) -> None:
+        TOLERANCE = 1.0  # seconds — window for matching a mark to a detection
+        user_marks = sorted(self._user_marks)
+        detections = sorted(self._detection_timestamps)
+        if not user_marks:
+            return
+
+        matched_marks: set = set()
+        matched_dets: set = set()
+        for i, t_user in enumerate(user_marks):
+            for j, t_det in enumerate(detections):
+                if j not in matched_dets and abs(t_user - t_det) <= TOLERANCE:
+                    matched_marks.add(i)
+                    matched_dets.add(j)
+                    break
+
+        tp = len(matched_marks)
+        fn = len(user_marks) - tp
+        fp = len(detections) - len(matched_dets)
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+        lines = [
+            "═" * 30,
+            "  MANUAL ACCURACY REPORT",
+            "═" * 30,
+            f"  User marks:     {len(user_marks):>3}",
+            f"  Model fires:    {len(detections):>3}  (suspicious)",
+            "─" * 30,
+            f"  True Positives:  {tp:>3}  ✓ caught",
+            f"  False Negatives: {fn:>3}  ✗ missed",
+            f"  False Positives: {fp:>3}  ? spurious",
+            "─" * 30,
+            f"  Recall:    {recall:>6.1%}",
+            f"  Precision: {precision:>6.1%}",
+            f"  F1 Score:  {f1:>6.1%}",
+            "─" * 30,
+            f"  Match window: ±{TOLERANCE:.1f}s",
+            "═" * 30,
+        ]
+        self._topk_box.delete("1.0", "end")
+        self._topk_box.insert("end", "\n".join(lines))
+        self._detail_label.configure(
+            text=(
+                f"Recall:    {recall:.1%}  ({tp}/{tp + fn} marks caught)\n"
+                f"Precision: {precision:.1%}  ({tp}/{tp + fp} fires correct)\n"
+                f"F1 Score:  {f1:.1%}\n"
+                f"Tolerance: ±{TOLERANCE:.1f}s"
+            )
+        )
+        badge_color = SAFE if recall >= 0.70 else (WARN if recall >= 0.40 else DANGER)
+        self._latest_badge.configure(
+            text=f"RECALL  {recall:.0%}",
+            fg_color=badge_color,
+            text_color="#08101E",
+        )
+        self._log_system(
+            f"Accuracy: Recall={recall:.1%}  Precision={precision:.1%}  F1={f1:.1%}"
+            f"  (TP={tp} FN={fn} FP={fp})"
+        )
 
     def _on_close(self) -> None:
         if self._is_streaming or self._sd_stream is not None or self._sd_output is not None:
