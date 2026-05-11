@@ -76,40 +76,51 @@ No manual download needed. The training script fetches it automatically from [Ze
 
 ---
 
-### 5. Obtain the trained models
+### 5. Trained models
 
-The `.keras` and `.tflite` model files are not tracked in git. You have two options:
-
-**Option A — Re-train from scratch** *(recommended — takes ~5–10 min per feature type)*
-
-```bash
-# Train the best-performing feature type (LogMel)
-python -m train.train --feature-type LogMel
-
-# Or run a full sweep across FFT, LogMel, and MFCC
-python -m train.feature_sweep
-```
-
-Trained models are saved to `models/` automatically. The classifier mode is controlled by `CLASSIFIER_MODE` in `config.py` (default: `yamnet`, no training needed).
-
-**Option B — Copy models from a teammate**
-
-Copy the `models/` folder directly from a machine that has already trained. The required files are:
+The production model weights are committed to the repository — **no extra download needed**. After cloning you will have:
 
 ```
 models/
-├── cnn_gunshot_classifier.keras          ← main model
-└── feature_sweep_stagea6/
-    ├── fft/cnn_gunshot_classifier.keras
-    ├── logmel/cnn_gunshot_classifier.keras
-    └── mfcc/cnn_gunshot_classifier.keras
+├── yamnet_head/
+│   └── yamnet_head_classifier.keras    ← best model (YAMNet embedding head, ~3 MB)
+├── feature_sweep_stagea6/
+│   └── fft/
+│       └── cnn_gunshot_classifier.keras  ← CNN baseline (~18 MB)
+└── finetuned_realworld/
+    └── cnn_gunshot_classifier.keras      ← CNN fine-tuned on real audio (~24 MB)
+```
+
+The default `CLASSIFIER_MODE` is `yamnet` (pure YAMNet, no extra model needed). To switch to the best-performing model:
+
+```python
+# in impulsive_sound_detection/config.py
+CLASSIFIER_MODE: str = "yamnet_head"
 ```
 
 ---
 
-### 6. (Optional) Configure paths and parameters
+### 6. Configure the project root path
 
-All tunable constants live in [`impulsive_sound_detection/config.py`](impulsive_sound_detection/config.py). Update `GUNSHOT_SPECTROGRAM_DIR` and `VOICE_DATASET_DIR` if your data lives outside the default project root.
+All paths in the pipeline resolve relative to `ISD_ROOT`. By default it points to Charlie's dev machine. **Every team member must set this once** to wherever they cloned the repo:
+
+**Windows (PowerShell — run once, then restart your terminal):**
+```powershell
+[System.Environment]::SetEnvironmentVariable("ISD_ROOT", "C:\path\to\MLProject", "User")
+```
+
+**macOS / Linux:**
+```bash
+echo 'export ISD_ROOT="/path/to/MLProject"' >> ~/.bashrc   # or ~/.zshrc
+source ~/.bashrc
+```
+
+Alternatively, set it inline for a single session:
+```powershell
+$env:ISD_ROOT = "C:\path\to\MLProject"   # PowerShell
+```
+
+> If `ISD_ROOT` is not set, the pipeline falls back to `C:\Users\holde\Documents\MLProject` (Charlie's machine only).
 
 ---
 

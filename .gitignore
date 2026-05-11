@@ -49,6 +49,10 @@ Gunshot Audio Spectrogram Dataset for Binary Class/MFCC/
 # ── ML model artefacts & caches ───────────────────────────────────────
 *.h5
 *.keras
+# Production models are committed — keep only checkpoint/scratch files excluded
+!models/yamnet_head/yamnet_head_classifier.keras
+!models/feature_sweep_stagea6/fft/cnn_gunshot_classifier.keras
+!models/finetuned_realworld/cnn_gunshot_classifier.keras
 *.tflite
 *.ckpt
 *.pb
