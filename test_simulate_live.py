@@ -124,8 +124,11 @@ def main():
           f"(threshold ×{args.threshold_multiplier})  Ctrl+C to stop\n")
 
     try:
+        first_loop = True
         while run:
-            monitor.reset()
+            if first_loop:
+                monitor.reset()   # clear state only on the very first pass
+                first_loop = False
             offset = 0
             total  = len(waveform)
             start  = time.monotonic()

@@ -1,6 +1,7 @@
 import sqlite3
+from pathlib import Path
 
-db = sqlite3.connect(r'C:\Github\ImpulsiveSoundDetection\logs\host.db')
+db = sqlite3.connect(Path(__file__).resolve().parent / 'logs' / 'host.db')
 
 print('=== TABLES ===')
 for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'"):

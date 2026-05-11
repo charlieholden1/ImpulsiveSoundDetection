@@ -139,7 +139,7 @@ def generate(name: str) -> Path:
     peak       = float(np.abs(wav).max())
     rms_all    = float(np.sqrt(np.mean(wav ** 2)))
     print(f"  [{name:>8}]  {filename:<16}  {description}")
-    print(f"             {duration_s:.1f}s  peak={peak:.3f}  rms={rms_all:.5f}  → {out_path}")
+    print(f"             {duration_s:.1f}s  peak={peak:.3f}  rms={rms_all:.5f}  -> {out_path}")
     return out_path
 
 
@@ -167,14 +167,14 @@ def main():
 
     targets = [args.type] if args.type else list(GENERATORS.keys())
 
-    print(f"\nGenerating {len(targets)} test WAV file(s) → {OUT_DIR}\n")
+    print(f"\nGenerating {len(targets)} test WAV file(s) -> {OUT_DIR}\n")
     paths = []
     for name in targets:
         paths.append(generate(name))
 
-    print(f"\nDone. Run with simulate_live.py, e.g.:")
+    print(f"\nDone. Run with test_simulate_live.py, e.g.:")
     for p in paths:
-        print(f"  python simulate_live.py --wav {p.name} "
+        print(f"  python test_simulate_live.py --wav {p.name} "
               f"--threshold-multiplier 1.5 --mqtt "
               f"--broker-host 127.0.0.1 --node-id node_sim --loop")
 

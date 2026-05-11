@@ -6,18 +6,17 @@ services:
       - "3000:3000"    # HTTP (redirects to HTTPS when TLS configured)
       - "3443:3443"    # HTTPS
     volumes:
-      - C:\Github\ImpulsiveSoundDetection\logs:/data
-      # Uncomment after running generate-cert.ps1:
-      - .\certs:/certs:ro
+      - C:/Users/sholo/Downloads/ImpulsiveSoundDetection/ImpulsiveSoundDetection/logs:/data
+      - ./certs:/certs:ro
+    # ADMIN_PASSWORD_HASH is loaded via env_file (not inline environment) to
+    # prevent Docker Compose from corrupting the $2b$... bcrypt hash via
+    # $ interpolation, which happens even when using ${VAR} substitution.
+    env_file:
+      - .env
     environment:
       - ISD_DB_PATH=/data/host.db
-      # bcrypt hash of your admin password.
-      # Generate with: node -e "require('bcrypt').hash('yourpassword',12).then(console.log)"
-      # Then paste the hash (starting with $2b$) here.
-      - ADMIN_PASSWORD_HASH=$2b$12$1Vz9UvepzOjmgLtcoNCRxudsTUI1VtAXHkfQckwcEfTRARYBC4GoK
       - PORT=3000
       - HTTPS_PORT=3443
-      # Uncomment after running generate-cert.ps1:
       - CERT_PATH=/certs/server.crt
       - KEY_PATH=/certs/server.key
     restart: unless-stopped

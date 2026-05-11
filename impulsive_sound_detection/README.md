@@ -113,7 +113,6 @@ ImpulsiveSoundDetection/
 │       ├── Dockerfile
 │       ├── docker-compose.yml          ← Edit: hash + cert paths
 │       ├── generate-cert.ps1           ← Run once to create TLS certs
-│       ├── .env.example                ← Copy to .env and fill in
 │       └── .dockerignore
 ├── train/                              ← EfficientNetB0 training scripts
 ├── models/                             ← Trained .keras models (not in git)
@@ -122,7 +121,7 @@ ImpulsiveSoundDetection/
 ├── test_mqtt.py                        ← Publish a fake MQTT detection
 ├── test_pipeline.py                    ← Run pipeline on WAV + publish
 ├── test_audio.py                       ← Generate synthetic WAV files
-├── simulate_live.py                    ← Stream WAV at real-time speed
+├── test_simulate_live.py               ← Stream WAV at real-time speed
 ├── check_db.py                         ← Inspect host.db contents
 └── README.md
 ```
@@ -219,10 +218,17 @@ mkdir -p logs
 
 ### 6. Configure the dashboard
 
-```bash
-cd impulsive_sound_detection/dashboard_server
-cp .env.example .env
+```powershell
+cd impulsive_sound_detection\dashboard_server
 ```
+
+Create the `.env` file from the template:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+You will fill in the `ADMIN_PASSWORD_HASH` value in the next step.
 
 #### 6a. Install Node dependencies and generate bcrypt hash
 
@@ -231,9 +237,20 @@ npm install
 
 # Generate a bcrypt hash of your chosen admin password
 node -e "require('bcrypt').hash('your-password-here', 12).then(console.log)"
+# Shorthand via package.json script:
+# npm run hash your-password-here
 ```
 
-This takes a few seconds. Copy the printed `$2b$12$...` string — you need it next.
+This takes a few seconds. You will get a 60-character string starting with `$2b$12$`.
+
+**⚠ `$` escaping required:** Docker Compose interpolates `$` signs in `.env` values, silently corrupting a bcrypt hash. Every `$` in the hash must be doubled to `$$` when you write it to `.env`. For example, the hash `$2b$12$ABC...` becomes `$$2b$$12$$ABC...` in `.env`.
+
+The three `$` signs appear at the very start of the hash (`$2b$12$`). No `$` signs appear in the rest of the hash.
+
+```powershell
+# In .env — replace every leading $ with $$:
+ADMIN_PASSWORD_HASH=$$2b$$12$$<rest of your hash>
+```
 
 #### 6b. Generate TLS certificate for HTTPS
 
@@ -252,6 +269,8 @@ Replace `192.168.1.100` with your actual host LAN IP (`ipconfig` to find it).
 
 #### 6c. Edit docker-compose.yml
 
+> **Critical:** Update the left side of the `logs` volume mount to match the **absolute Windows path** where you cloned the repo. Find your path with `(Get-Location).Path` or `pwd`. The right side (`/data`) must stay as-is.
+
 ```yaml
 services:
   isd-dashboard:
@@ -261,7 +280,7 @@ services:
       - "3000:3000"
       - "3443:3443"
     volumes:
-      - C:\Github\ImpulsiveSoundDetection\logs:/data
+      - C:\your\actual\path\to\ImpulsiveSoundDetection\logs:/data   # ← update this
       - .\certs:/certs:ro
     environment:
       - ISD_DB_PATH=/data/host.db
@@ -273,12 +292,20 @@ services:
     restart: unless-stopped
 ```
 
-#### 6d. Update config.py
+#### 6d. Confirm config.py (no edit required for basic setup)
+
+`ISD_ROOT` now defaults to the repo root automatically (resolved relative to `config.py`), so no manual path edit is needed for a standard clone. The value can still be overridden with the `ISD_ROOT` environment variable if needed.
+
+Confirm `MQTT_BROKER_HOST` matches your intended broker:
 
 ```python
-# impulsive_sound_detection/config.py
-ISD_ROOT         = Path(r"C:\Github\ImpulsiveSoundDetection")
-MQTT_BROKER_HOST = "127.0.0.1"   # change to LAN IP when RPi nodes are active
+MQTT_BROKER_HOST = "127.0.0.1"   # change to host LAN IP when RPi nodes are active
+```
+
+If you have a non-standard layout or want to override, set the env var before running:
+
+```powershell
+$env:ISD_ROOT = "C:\your\path\to\ImpulsiveSoundDetection"
 ```
 
 #### 6e. Add to .gitignore
@@ -375,26 +402,36 @@ sudo systemctl status isd-node
 
 ## Running the System
 
-Start these in order every time:
+Start these **in order** every time. Docker Desktop must already be running.
 
 **Terminal 1 — MQTT Broker**
+
+If running Mosquitto as a Windows service (the default after `winget install`), it is already running. Skip this step or verify with:
+```powershell
+sc.exe query mosquitto    # STATE should be RUNNING
+```
+To run manually instead:
 ```powershell
 & "C:\Program Files\mosquitto\mosquitto.exe" -v
 ```
 
 **Terminal 2 — Host Subscriber**
 ```powershell
-cd C:\Github\ImpulsiveSoundDetection
+cd C:\path\to\ImpulsiveSoundDetection   # ← your actual repo path
 python -m impulsive_sound_detection.host_subscriber `
     --broker-host 127.0.0.1 `
     --dashboard-url https://localhost:3443
 ```
 
-Expected output:
+> **Wait for startup:** TensorFlow loads on first run (~15 seconds). Do **not** start Terminal 3 until you see the "HostSubscriber running" message below — starting Docker before `host.db` is created puts the dashboard in DEMO mode.
+
+Expected output (after ~15 s):
 ```
-Host database ready at C:\Github\ImpulsiveSoundDetection\logs\host.db
+Host database ready at C:\path\to\ImpulsiveSoundDetection\logs\host.db
 HostSubscriber running – waiting for node data …
 ```
+
+> **Note:** You may see TensorFlow deprecation warnings and a paho-mqtt `Callback API version 1 is deprecated` warning on startup. These are expected and non-fatal.
 
 **Terminal 3 — Web Dashboard**
 ```powershell
@@ -404,9 +441,16 @@ docker compose up --build
 
 Expected output:
 ```
+[DB] Live mode – loaded from /data/host.db
 ISD Dashboard → https://localhost:3443  (HTTPS)
 Database mode : LIVE
+Reading from  : /data/host.db
 HTTP redirect → http://localhost:3000  (redirects to HTTPS)
+```
+
+If you see `Database mode : DEMO` instead, `host.db` was not found when the container started — restart Docker after Terminal 2 finishes loading:
+```powershell
+docker compose down && docker compose up
 ```
 
 Open **https://localhost:3443**. On first visit click **Advanced → Proceed to localhost** to accept the self-signed certificate.
@@ -418,7 +462,7 @@ python -m impulsive_sound_detection.main live \
     --mqtt --broker-host 192.168.1.100 --node-id node_1
 
 # Or simulate locally for testing
-python simulate_live.py --wav sine.wav --threshold-multiplier 1.5 \
+python test_simulate_live.py --wav sine.wav --threshold-multiplier 1.5 \
     --mqtt --broker-host 127.0.0.1 --node-id node_sim --loop
 ```
 
@@ -565,9 +609,11 @@ docker rm -f isd-dashboard && docker compose up
 
 ```powershell
 python test_audio.py                                        # generates spike/sine/sawtooth WAVs
-python -m impulsive_sound_detection.main detect --wav spike.wav   # expect is_suspicious=False
-python -m impulsive_sound_detection.main detect --wav sine.wav    # expect label=background
+python -m impulsive_sound_detection.main detect --wav spike.wav --no-viz
+python -m impulsive_sound_detection.main detect --wav sine.wav --no-viz
 ```
+
+Expected: `0 detections` for both files. The test WAVs are 5 seconds long and `STREAM_WARMUP_SEC = 5.0` in config.py, so Stage 1 never exits warmup before the file ends. This validates that the pipeline loads and runs without crashing. Use LT-4 (`test_simulate_live.py`) for a triggered detection test — it loops the file, allowing the baseline to stabilise across multiple passes.
 
 ---
 
@@ -583,9 +629,13 @@ python check_db.py      # should show new row with is_suspicious=1
 ### LT-4 · Simulate live stream
 
 ```powershell
-python simulate_live.py --wav sine.wav --threshold-multiplier 1.5 `
+python test_simulate_live.py --wav spike.wav --threshold-multiplier 0.5 `
     --mqtt --broker-host 127.0.0.1 --node-id node_sim --loop
 ```
+
+> **`--loop` is required** for detections. The test WAVs are 5 s long and `STREAM_WARMUP_SEC = 5.0`, so Stage 1 never fires on the first pass. On loop 2+ the spike occurs after warmup and triggers YAMNet. Threshold `0.5` is needed because the baseline adapts to the spike level after the first loop. Use `sine.wav` for a smoother signal.
+
+Expected: YAMNet classifies the spike window (likely `Outside`, `Rustling leaves`, or similar — the synthetic spike is not a real gunshot). The key check is that events appear in the database and on the Live Feed, not the specific label.
 
 Watch the Live Feed — events appear for `node_sim`. RMS chart Y-axis scales dynamically.
 
@@ -722,19 +772,46 @@ Run with at least one RPi5 node active on the LAN.
 
 ## Troubleshooting
 
-### Dashboard shows DEMO MODE instead of LIVE DATA
+### Docker Desktop must be running before `docker compose up`
 
-`host.db` is not found at the path in `ISD_DB_PATH`, or the Docker volume mount path is wrong.
+If you get `failed to connect to the docker API`, Docker Desktop is not started.
+Launch it from the Start Menu or via:
+```powershell
+Start-Process "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+```
+Wait ~30 seconds for the whale icon to appear in the system tray, then retry.
+
+---
+
+### Port 3000 or 3443 already in use
 
 ```powershell
-# Verify the file exists
-Test-Path C:\Github\ImpulsiveSoundDetection\logs\host.db
+netstat -ano | findstr ":3000 "
+# Note the PID in the last column, then:
+docker ps    # check if another container is using it
+```
+Stop the conflicting container:
+```powershell
+docker stop <container-name>
+```
+Then re-run `docker compose down && docker compose up`.
 
-# If it doesn't exist: start host_subscriber then run test_mqtt.py to create it
-python test_mqtt.py
+---
+
+### Dashboard shows DEMO MODE instead of LIVE DATA
+
+`host.db` is not found at the path in `ISD_DB_PATH`, or Docker started before `host_subscriber.py` created it.
+
+Most likely cause: Terminal 3 (Docker) was started before Terminal 2 finished loading (~15 s for TensorFlow). Fix: wait for the "HostSubscriber running" message, then:
+```powershell
+docker compose down && docker compose up
 ```
 
-Also verify the left side of the volume mount in `docker-compose.yml` matches the actual Windows path to your `logs/` folder.
+Also verify the left side of the volume mount in `docker-compose.yml` matches the actual Windows path to your `logs/` folder:
+```powershell
+# The path on the left must match where host.db is created
+Test-Path C:\your\path\to\ImpulsiveSoundDetection\logs\host.db
+```
 
 ---
 
@@ -753,18 +830,31 @@ docker rm -f isd-dashboard && docker compose up --build
 
 ### Admin login always fails
 
-Hash in `docker-compose.yml` is wrong, the placeholder, or miscopied.
+The most common cause: the bcrypt hash in `.env` is being silently corrupted by Docker Compose `$` interpolation.
+
+Docker Compose treats `$` in values as a variable substitution prefix, even in `.env` files. A bcrypt hash like `$2b$12$Abc...` has three `$` signs — Docker Compose replaces them with empty strings and the 60-character hash arrives in the container as a malformed 46-character string that will never match.
+
+**Fix:** use `$$` for every `$` in the hash when writing to `.env`:
 
 ```powershell
-# Regenerate the hash
+# Generate hash
 node -e "require('bcrypt').hash('your-password', 12).then(console.log)"
+# Output: $2b$12$XYZ...
 
-# Paste into docker-compose.yml — must start with $2b$12$
-# Rebuild after updating
-docker rm -f isd-dashboard && docker compose up --build
+# Write to .env with $$ escaping for every $ sign
+# Example output line: $2b$12$XYZ...
+# In .env write: $$2b$$12$$XYZ...
 ```
 
-Bcrypt is case-sensitive. Verify you type the exact same password you hashed.
+Verify the hash length inside the container (must be exactly 60 chars):
+```powershell
+docker exec isd-dashboard sh -c 'echo "${#ADMIN_PASSWORD_HASH}"'
+# Should print: 60
+```
+
+If it's less than 60, the hash is still being corrupted. Regenerate and re-escape.
+
+Bcrypt is also case-sensitive — verify you type the exact same password you hashed.
 
 ---
 
@@ -828,12 +918,12 @@ npm install bcryptjs --save
 
 ---
 
-### simulate_live.py doesn't trigger any detections
+### test_simulate_live.py doesn't trigger any detections
 
 The signal level is too low for the threshold multiplier. Try:
 
 ```powershell
-python simulate_live.py --wav spike.wav --threshold-multiplier 0.5 `
+python test_simulate_live.py --wav spike.wav --threshold-multiplier 0.5 `
     --mqtt --broker-host 127.0.0.1 --node-id node_sim
 ```
 

@@ -15,7 +15,7 @@ from pathlib import Path
 #    Training / dataset paths (development machine).
 #    On deployed RPi nodes these are not used at runtime.
 # ──────────────────────────────────────────────────────────────────────
-ISD_ROOT: Path = Path(os.environ.get("ISD_ROOT", r"C:\Users\holde\Documents\MLProject"))
+ISD_ROOT: Path = Path(os.environ.get("ISD_ROOT", str(Path(__file__).resolve().parent.parent)))
 
 GUNSHOT_SPECTROGRAM_DIR: Path = (
     ISD_ROOT / "Gunshot Audio Spectrogram Dataset for Binary Class"

@@ -33,6 +33,14 @@ from typing import Optional
 
 from .classifier import ClassificationResult
 
+# Ensure the terminal accepts Unicode box-drawing characters and emoji.
+# On Windows the default console encoding is cp1252; reconfigure to UTF-8.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 # ──────────────────────────────────────────────────────────────────────
 # ANSI escape helpers

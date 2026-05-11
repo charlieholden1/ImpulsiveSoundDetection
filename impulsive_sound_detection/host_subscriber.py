@@ -30,11 +30,18 @@ import argparse
 import json
 import logging
 import sqlite3
+import ssl
 import threading
 import time
 import urllib.request
 from pathlib import Path
 from typing import Callable, Dict, Optional
+
+# Unverified SSL context for localhost-only internal notify calls.
+# Self-signed certs are expected for LAN deployment; no external trust needed.
+_UNVERIFIED_SSL = ssl.create_default_context()
+_UNVERIFIED_SSL.check_hostname = False
+_UNVERIFIED_SSL.verify_mode = ssl.CERT_NONE
 
 try:
     import paho.mqtt.client as mqtt
@@ -334,7 +341,7 @@ class HostSubscriber:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=2) as resp:
+                with urllib.request.urlopen(req, timeout=2, context=_UNVERIFIED_SSL) as resp:
                     logger.debug(
                         "[SSE] Notified dashboard: %s %s (status %d)",
                         result.node_id, result.label, resp.status,
